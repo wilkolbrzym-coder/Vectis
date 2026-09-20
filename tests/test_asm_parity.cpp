@@ -53,11 +53,11 @@ std::vector<std::size_t> interesting_sizes() {
 
 VECTIS_TEST(asm_dot_matches_intrinsics_exactly) {
     if (!kernels::asm_kernels_available()) {
-        std::printf("      skipped: built without assembly kernels\n");
+        vtest::skip("built without assembly kernels");
         return;
     }
     if (!kernels::runnable_here()) {
-        std::printf("      skipped: host has no AVX2\n");
+        vtest::skip("host has no AVX2");
         return;
     }
 
@@ -93,11 +93,11 @@ VECTIS_TEST(asm_dot_matches_intrinsics_exactly) {
 
 VECTIS_TEST(asm_saxpy_matches_intrinsics_exactly) {
     if (!kernels::asm_kernels_available()) {
-        std::printf("      skipped: built without assembly kernels\n");
+        vtest::skip("built without assembly kernels");
         return;
     }
     if (!kernels::runnable_here()) {
-        std::printf("      skipped: host has no AVX2\n");
+        vtest::skip("host has no AVX2");
         return;
     }
 
@@ -150,11 +150,11 @@ VECTIS_TEST(asm_saxpy_matches_intrinsics_exactly) {
 
 VECTIS_TEST(asm_sum_matches_intrinsics_exactly) {
     if (!kernels::asm_kernels_available()) {
-        std::printf("      skipped: built without assembly kernels\n");
+        vtest::skip("built without assembly kernels");
         return;
     }
     if (!kernels::runnable_here()) {
-        std::printf("      skipped: host has no AVX2\n");
+        vtest::skip("host has no AVX2");
         return;
     }
 
@@ -185,8 +185,8 @@ VECTIS_TEST(asm_sum_matches_intrinsics_exactly) {
 #else
 
 VECTIS_TEST(asm_kernels_not_built) {
-    std::printf("      skipped: this build has no assembly layer "
-                "(VECTIS_ENABLE_ASM=OFF or non-x86 host)\n");
+    vtest::skip("this build has no assembly layer "
+                "(VECTIS_ENABLE_ASM=OFF or non-x86 host)");
 }
 
 #endif

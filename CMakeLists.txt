@@ -140,8 +140,21 @@ target_include_directories(vectis INTERFACE
 # C++26 is what this project is *built* at, not what it *requires*: the headers
 # work at C++20, use C++23 features where the compiler offers them, and will use
 # C++26 reflection the day it ships.
-set(VECTIS_CXX_STANDARD "26" CACHE STRING
-    "Language standard for the project's own build: 20, 23 or 26")
+#
+# CMAKE_CXX_STANDARD, when the user sets it, wins.  The two knobs have to agree
+# rather than compete: this project puts `-std=c++${VECTIS_CXX_STANDARD}` on the
+# INTERFACE of the library, and target compile options are appended *after*
+# CMAKE_CXX_FLAGS, so a build configured with -DCMAKE_CXX_STANDARD=20 would have
+# been quietly compiled a second time as C++26 - the later flag wins - which is
+# precisely the bug that made the `standards` CI job test nothing but C++26.
+# Mirroring the user's choice here is what makes that job a test of the floor.
+if(CMAKE_CXX_STANDARD)
+    set(VECTIS_CXX_STANDARD "${CMAKE_CXX_STANDARD}" CACHE STRING
+        "Language standard for the project's own build: 20, 23 or 26" FORCE)
+else()
+    set(VECTIS_CXX_STANDARD "26" CACHE STRING
+        "Language standard for the project's own build: 20, 23 or 26")
+endif()
 
 target_compile_features(vectis INTERFACE cxx_std_20)
 
@@ -161,10 +174,21 @@ target_compile_options(vectis INTERFACE
 # without touching compiler flags.
 
 include(CheckCXXCompilerFlag)
+# Probe the standard actually being requested, not a hard-coded 26: on a
+# compiler that accepts neither, the library falls back to the cxx_std_20 floor
+# declared above rather than failing to configure, and the summary says which of
+# the two happened.
+check_cxx_compiler_flag("-std=c++${VECTIS_CXX_STANDARD}" VECTIS_HAS_STD_FLAG)
+# Kept as its own answer because the reflection path needs C++26 and the headers
+# are meant to work below it; the summary reports both.
 check_cxx_compiler_flag("-std=c++26" VECTIS_HAS_CXX26)
-if(VECTIS_HAS_CXX26)
+if(VECTIS_HAS_STD_FLAG)
     target_compile_options(vectis INTERFACE
         $<BUILD_INTERFACE:-std=c++${VECTIS_CXX_STANDARD}>)
+else()
+    message(STATUS
+        "  note: this compiler does not accept -std=c++${VECTIS_CXX_STANDARD}; "
+        "building at the C++20 floor instead")
 endif()
 
 # ---------------------------------------------------------------------------
@@ -278,7 +302,7 @@ message(STATUS "")
 message(STATUS "================= Vectis ${PROJECT_VERSION} =================")
 message(STATUS "  compiler      : ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
 message(STATUS "  host          : ${CMAKE_SYSTEM_PROCESSOR} (x86=${VECTIS_ON_X86})")
-message(STATUS "  C++ standard  : ${VECTIS_CXX_STANDARD} (C++26 supported: ${VECTIS_HAS_CXX26})")
+message(STATUS "  C++ standard  : ${VECTIS_CXX_STANDARD} (flag accepted: ${VECTIS_HAS_STD_FLAG}, C++26 supported: ${VECTIS_HAS_CXX26})")
 message(STATUS "  reflection    : ${VECTIS_HAS_REFLECTION} (-freflection, P2996)")
 message(STATUS "  ISA tier      : ${VECTIS_ISA_TIER_RESOLVED}")
 message(STATUS "  ISA ceiling   : ${VECTIS_MAX_ISA_LEVEL} (0=scalar 1=sse42 2=avx2 3=avx512, 99=uncapped)")

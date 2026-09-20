@@ -124,11 +124,22 @@ concept Field =
     Vectorizable<typename D::type>;
 
 /// A bundle of Fields over a common struct type.
+///
+/// The `T` parameter is load-bearing, not a formality: a layout names its owner
+/// through `L::owner_type` (see vectis::layout in soa/soa.hpp), and the two are
+/// required to agree here.  Without that, a concept whose whole purpose is to
+/// say "L is a field bundle over T" was satisfied by any `L` that happened to
+/// have a `count()` - including one describing a completely different struct.
+///
+/// The per-field check is already enforced where the fields are declared:
+/// `layout` static_asserts `(FieldOf<Fields, Owner> && ...)` on itself, so a
+/// layout that exists at all has fields of the right kind.
 template <class L, class T>
 concept SoaLayout = requires {
-    L::count();
+    typename L::owner_type;
+    { L::count() } -> std::convertible_to<std::size_t>;
 } &&
-    std::convertible_to<decltype(L::count()), std::size_t> &&
+    std::same_as<typename L::owner_type, T> &&
     (L::count() > 0);
 
 // ------------------------------------------------------------- kernel shapes

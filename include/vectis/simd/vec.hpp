@@ -81,13 +81,27 @@ public:
     }
 
     /// Per-lane construction: `f32x4 v{1.0f, 2.0f, 3.0f, 4.0f}`.
+    ///
+    /// The final register of a vector whose lane count does not fill it reads
+    /// only its live lanes, staged through a zeroed full-width buffer - the same
+    /// path `load()` takes, and for the same reason: `tmp` holds exactly N
+    /// elements, so loading a whole register straight out of it would read
+    /// `reg_lanes - tail_lanes` elements past the end of the array.
     template <class... Us>
         requires (sizeof...(Us) == N) && (N > 1) &&
                  (std::convertible_to<Us, T> && ...)
     constexpr basic_vec(Us... vals) noexcept {
         const std::array<T, N> tmp{static_cast<T>(vals)...};
         for (std::size_t i = 0; i < num_regs; ++i) {
-            r_[i] = backend_type::load(tmp.data() + i * reg_lanes);
+            if (i < full_regs) {
+                r_[i] = backend_type::load(tmp.data() + i * reg_lanes);
+            } else {
+                alignas(64) T stage[reg_lanes] = {};
+                for (std::size_t j = 0; j < tail_lanes; ++j) {
+                    stage[j] = tmp[i * reg_lanes + j];
+                }
+                r_[i] = backend_type::load(stage);
+            }
         }
     }
 
@@ -262,7 +276,8 @@ public:
     [[nodiscard]] friend basic_vec operator-(const basic_vec& a, const basic_vec& b) noexcept {
         return binop(a, b, [](reg_type x, reg_type y) { return backend_type::sub(x, y); });
     }
-    [[nodiscard]] friend basic_vec operator*(const basic_vec& a, const basic_vec& b) noexcept {
+    [[nodiscard]] friend basic_vec operator*(const basic_vec& a, const basic_vec& b) noexcept
+        requires BackendHasMul<T, Abi> {
         return binop(a, b, [](reg_type x, reg_type y) { return backend_type::mul(x, y); });
     }
     [[nodiscard]] friend basic_vec operator/(const basic_vec& a, const basic_vec& b) noexcept
@@ -277,7 +292,8 @@ public:
 
     basic_vec& operator+=(const basic_vec& o) noexcept { *this = *this + o; return *this; }
     basic_vec& operator-=(const basic_vec& o) noexcept { *this = *this - o; return *this; }
-    basic_vec& operator*=(const basic_vec& o) noexcept { *this = *this * o; return *this; }
+    basic_vec& operator*=(const basic_vec& o) noexcept
+        requires BackendHasMul<T, Abi> { *this = *this * o; return *this; }
     basic_vec& operator/=(const basic_vec& o) noexcept
         requires std::floating_point<T> { *this = *this / o; return *this; }
 
@@ -324,16 +340,20 @@ public:
     [[nodiscard]] friend mask_type operator!=(const basic_vec& a, const basic_vec& b) noexcept {
         return cmpop(a, b, [](reg_type x, reg_type y) { return backend_type::cmpne(x, y); });
     }
-    [[nodiscard]] friend mask_type operator<(const basic_vec& a, const basic_vec& b) noexcept {
+    [[nodiscard]] friend mask_type operator<(const basic_vec& a, const basic_vec& b) noexcept
+        requires BackendHasOrdering<T, Abi> {
         return cmpop(a, b, [](reg_type x, reg_type y) { return backend_type::cmplt(x, y); });
     }
-    [[nodiscard]] friend mask_type operator<=(const basic_vec& a, const basic_vec& b) noexcept {
+    [[nodiscard]] friend mask_type operator<=(const basic_vec& a, const basic_vec& b) noexcept
+        requires BackendHasOrdering<T, Abi> {
         return cmpop(a, b, [](reg_type x, reg_type y) { return backend_type::cmple(x, y); });
     }
-    [[nodiscard]] friend mask_type operator>(const basic_vec& a, const basic_vec& b) noexcept {
+    [[nodiscard]] friend mask_type operator>(const basic_vec& a, const basic_vec& b) noexcept
+        requires BackendHasOrdering<T, Abi> {
         return cmpop(a, b, [](reg_type x, reg_type y) { return backend_type::cmpgt(x, y); });
     }
-    [[nodiscard]] friend mask_type operator>=(const basic_vec& a, const basic_vec& b) noexcept {
+    [[nodiscard]] friend mask_type operator>=(const basic_vec& a, const basic_vec& b) noexcept
+        requires BackendHasOrdering<T, Abi> {
         return cmpop(a, b, [](reg_type x, reg_type y) { return backend_type::cmpge(x, y); });
     }
 
@@ -354,23 +374,27 @@ public:
     /// Raw hardware estimate: ~12 significant bits on AVX2, ~14 on AVX-512, and
     /// exact on the scalar path.  Feed it to math::rsqrt for a usable result;
     /// on its own it is a seed, not an answer.
-    [[nodiscard]] basic_vec rsqrt_approx() const noexcept requires std::floating_point<T> {
+    [[nodiscard]] basic_vec rsqrt_approx() const noexcept
+        requires std::floating_point<T> && BackendHasReciprocal<T, Abi> {
         return unop(*this, [](reg_type x) { return backend_type::rsqrt_approx(x); });
     }
-    [[nodiscard]] basic_vec rcp_approx() const noexcept requires std::floating_point<T> {
+    [[nodiscard]] basic_vec rcp_approx() const noexcept
+        requires std::floating_point<T> && BackendHasReciprocal<T, Abi> {
         return unop(*this, [](reg_type x) { return backend_type::rcp_approx(x); });
     }
     [[nodiscard]] basic_vec abs() const noexcept {
         return unop(*this, [](reg_type x) { return backend_type::abs(x); });
     }
-    [[nodiscard]] basic_vec min(const basic_vec& o) const noexcept {
+    [[nodiscard]] basic_vec min(const basic_vec& o) const noexcept
+        requires BackendHasMinMax<T, Abi> {
         return binop(*this, o, [](reg_type x, reg_type y) { return backend_type::min(x, y); });
     }
-    [[nodiscard]] basic_vec max(const basic_vec& o) const noexcept {
+    [[nodiscard]] basic_vec max(const basic_vec& o) const noexcept
+        requires BackendHasMinMax<T, Abi> {
         return binop(*this, o, [](reg_type x, reg_type y) { return backend_type::max(x, y); });
     }
     [[nodiscard]] basic_vec fma(const basic_vec& b, const basic_vec& c) const noexcept
-        requires std::floating_point<T> {
+        requires std::floating_point<T> && BackendHasFma<T, Abi> {
         basic_vec out;
         for (std::size_t i = 0; i < num_regs; ++i) {
             out.r_[i] = backend_type::fma(r_[i], b.r_[i], c.r_[i]);

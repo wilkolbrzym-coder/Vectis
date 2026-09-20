@@ -213,12 +213,16 @@ VECTIS_TEST(simd_for_each_chunk_handles_ragged_tail) {
 namespace {
 
 void report_skip(const char* tier, bool built, bool supported) {
+    char msg[128];
     if (!built) {
-        std::printf("      skipped: the %s battery was not compiled into this "
-                    "build\n", tier);
+        std::snprintf(msg, sizeof msg,
+                      "the %s battery was not compiled into this build", tier);
+        vtest::skip(msg);
     } else if (!supported) {
-        std::printf("      skipped: host has no %s (compiled and linked, never "
-                    "executed here)\n", tier);
+        std::snprintf(msg, sizeof msg,
+                      "host has no %s (compiled and linked, never executed here)",
+                      tier);
+        vtest::skip(msg);
     }
 }
 
@@ -252,7 +256,7 @@ VECTIS_TEST(simd_canary_native) {
 
 VECTIS_TEST(simd_canary_avx512) {
     if (!vtest_batteries::avx512_battery_built() || !cpu::has(isa_level::avx512)) {
-        std::printf("      skipped: no AVX-512 here\n");
+        vtest::skip("no AVX-512 here");
         return;
     }
     vtest_batteries::run_avx512_canaries();

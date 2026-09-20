@@ -9,6 +9,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <utility>
 #include <vector>
 
 using namespace vectis;
@@ -211,4 +212,115 @@ VECTIS_TEST(soa_kernel_touches_nothing_past_the_end) {
     for (std::size_t i = 0; i < done; ++i) CHECK_ULP(x[i], src[i].x + 1.0f, 0);
     // ...and nothing at or after it was written at all.
     for (std::size_t i = done; i < n; ++i) CHECK_ULP(x[i], src[i].x, 0);
+}
+
+/// Every whole block, and no partial one, on every length.
+///
+/// The count was previously asserted only for n = 70 - a length with a ragged
+/// tail, where `i + N <= size_` and the subtly wrong `i + N < size_` agree.  A
+/// loop that skipped the last complete block therefore passed the whole suite,
+/// and the kernel test could not see it either, because integrate_soa's scalar
+/// epilogue recomputes the block the vector loop dropped.  Lengths that are
+/// exact multiples of N are the ones that tell the two apart.
+VECTIS_TEST(soa_for_each_block_covers_every_whole_block) {
+    constexpr std::size_t N = 16;
+    for (const std::size_t n : {0u, 1u, 15u, 16u, 17u, 31u, 32u, 33u, 48u, 64u, 128u}) {
+        auto src = make_particles(n);
+        soa_array<ParticleLayout> arr(src.data(), n);
+
+        std::size_t blocks = 0;
+        std::size_t first = 0;
+        std::size_t last = 0;
+        const std::size_t done = arr.for_each_block<N>([&](std::size_t i) {
+            if (blocks == 0) first = i;
+            last = i;
+            ++blocks;
+        });
+
+        CHECK_EQ(done, (n / N) * N);
+        CHECK_EQ(blocks, n / N);
+        if (blocks != 0) {
+            CHECK_EQ(first, 0u);
+            CHECK_EQ(last, ((n / N) - 1) * N);
+        }
+    }
+}
+
+// ===========================================================================
+// Value semantics
+// ===========================================================================
+
+/// The one invariant this container has is `size_ == every array's size`, and a
+/// move is where it used to break.
+///
+/// With the special members defaulted, a move left every `std::vector` empty
+/// but copied `size_` across, so the moved-from object reported the pre-move
+/// size through size(), empty() and field_bytes() while `data<F>()` returned
+/// nullptr - and `to_aos` below then dereferenced eight null pointers.  The
+/// container is left empty and consistent now, as the standard containers are.
+VECTIS_TEST(soa_move_leaves_a_consistent_container) {
+    auto src = make_particles(8);
+    soa_array<ParticleLayout> a(src.data(), 8);
+
+    soa_array<ParticleLayout> b(std::move(a));
+
+    CHECK_EQ(b.size(), 8u);
+    CHECK_EQ(a.size(), 0u);
+    CHECK(a.empty());
+    CHECK_EQ(a.field_bytes<F_x>(), 0u);
+
+    // Reading the moved-from container must be a no-op rather than a fault.
+    std::vector<Particle> scratch(8);
+    a.to_aos(scratch.data());
+
+    // And the moved-to container owns the values.
+    std::vector<Particle> back(8);
+    b.to_aos(back.data());
+    for (std::size_t i = 0; i < 8; ++i) {
+        CHECK_ULP(back[i].x, src[i].x, 0);
+        CHECK_ULP(back[i].life, src[i].life, 0);
+    }
+}
+
+VECTIS_TEST(soa_move_assign_and_swap_keep_size_in_step) {
+    auto s1 = make_particles(5);
+    auto s2 = make_particles(9);
+
+    soa_array<ParticleLayout> a(s1.data(), 5);
+    soa_array<ParticleLayout> b(s2.data(), 9);
+
+    a = std::move(b);
+    CHECK_EQ(a.size(), 9u);
+    CHECK_EQ(b.size(), 0u);
+    CHECK(b.empty());
+
+    soa_array<ParticleLayout> c(s1.data(), 5);
+    using std::swap;
+    swap(a, c);
+    CHECK_EQ(a.size(), 5u);
+    CHECK_EQ(c.size(), 9u);
+
+    std::vector<Particle> back(9);
+    c.to_aos(back.data());
+    for (std::size_t i = 0; i < 9; ++i) CHECK_ULP(back[i].x, s2[i].x, 0);
+
+    std::vector<Particle> back5(5);
+    a.to_aos(back5.data());
+    for (std::size_t i = 0; i < 5; ++i) CHECK_ULP(back5[i].x, s1[i].x, 0);
+}
+
+/// A copy is independent of its source, and resizing one does not touch the
+/// other.
+VECTIS_TEST(soa_copy_is_independent) {
+    auto src = make_particles(6);
+    soa_array<ParticleLayout> a(src.data(), 6);
+    soa_array<ParticleLayout> b = a;
+
+    CHECK_EQ(b.size(), 6u);
+    b.data<F_x>()[0] = 999.0f;
+    CHECK_ULP(a.data<F_x>()[0], src[0].x, 0);
+
+    b.resize(3);
+    CHECK_EQ(b.size(), 3u);
+    CHECK_EQ(a.size(), 6u);
 }

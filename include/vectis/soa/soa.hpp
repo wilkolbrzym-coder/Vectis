@@ -145,6 +145,41 @@ public:
     /// Build from an existing array of structs: the AoS -> SoA conversion.
     soa_array(const owner_type* src, std::size_t n) { assign(src, n); }
 
+    // ------------------------------------------------------- special members
+    //
+    // Written out rather than defaulted, because the defaulted move constructor
+    // and move assignment would leave `size_` describing a container whose
+    // arrays had just been emptied - the one invariant this class has is
+    // `size_ == arrays_[i].size()` for every field, and a moved-from object
+    // would then report the pre-move size through size(), empty() and
+    // field_bytes() while data<F>() returned nullptr.  Anything reading it -
+    // to_aos, load<F,N>, for_each_block - would dereference that null.
+    // The moved-from object is left empty and consistent, as the standard
+    // containers are.
+    soa_array(const soa_array&) = default;
+    soa_array(soa_array&& other) noexcept
+        : arrays_(std::move(other.arrays_)),
+          size_(std::exchange(other.size_, 0)) {}
+
+    soa_array& operator=(const soa_array&) = default;
+    soa_array& operator=(soa_array&& other) noexcept {
+        arrays_ = std::move(other.arrays_);
+        size_   = std::exchange(other.size_, 0);
+        return *this;
+    }
+
+    void swap(soa_array& other) noexcept {
+        using std::swap;
+        swap(arrays_, other.arrays_);
+        swap(size_, other.size_);
+    }
+    friend void swap(soa_array& a, soa_array& b) noexcept { a.swap(b); }
+
+    /// Grow or shrink every field to `n`.
+    ///
+    /// `size_` is written last, so an allocation failure part-way through
+    /// leaves every array at least as long as `size_` claims and no read can
+    /// leave the storage - the container stays usable, just under-resized.
     void resize(std::size_t n) {
         Layout::for_each_field([&]<class F>() {
             std::get<Layout::template index_of<F>()>(arrays_).resize(n);
@@ -217,8 +252,13 @@ public:
     ///
     ///     std::size_t done = arr.for_each_block<8>([&](std::size_t i) { ... });
     ///     for (; done < arr.size(); ++done) { /* scalar tail */ }
+    ///
+    /// N must be positive: `for_each_block<0>` would advance by zero and never
+    /// terminate, and the compiler can say so here rather than leaving the
+    /// caller with a hang to diagnose.
     template <std::size_t N, class Fn>
     std::size_t for_each_block(Fn&& fn) {
+        static_assert(N > 0, "for_each_block needs a block size of at least one");
         std::size_t i = 0;
         for (; i + N <= size_; i += N) fn(i);
         return i;
@@ -226,6 +266,7 @@ public:
 
     template <std::size_t N, class Fn>
     std::size_t for_each_block(Fn&& fn) const {
+        static_assert(N > 0, "for_each_block needs a block size of at least one");
         std::size_t i = 0;
         for (; i + N <= size_; i += N) fn(i);
         return i;

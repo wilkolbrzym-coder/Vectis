@@ -222,13 +222,19 @@ public:
         return out;
     }
 
+    /// Equality over the N observable lanes.
+    ///
+    /// Deliberately routed through bits() rather than comparing the raw
+    /// registers: the padding lanes of a partial final register hold a real
+    /// predicate, so two masks that agree on every lane the caller can see -
+    /// and on which test(), count(), all(), any() and bits() all agree - can
+    /// still differ there.  Comparing the packed, lane-masked predicate is the
+    /// only spelling consistent with every other observer in this class.
     [[nodiscard]] friend bool operator==(const basic_mask& a, const basic_mask& b) noexcept {
-        for (std::size_t i = 0; i < num_regs; ++i) {
-            if (backend_type::mask_bits(a.m_[i]) != backend_type::mask_bits(b.m_[i])) {
-                return false;
-            }
-        }
-        return true;
+        return a.bits() == b.bits();
+    }
+    [[nodiscard]] friend bool operator!=(const basic_mask& a, const basic_mask& b) noexcept {
+        return !(a == b);
     }
 
     [[nodiscard]] const mask_reg (&raw() const noexcept)[num_regs] { return m_; }

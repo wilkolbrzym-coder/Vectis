@@ -25,6 +25,26 @@
 
 namespace vectis::math {
 
+namespace detail {
+
+/// Keep the seed wherever the Newton step produced a NaN.
+///
+/// The refinement is only allowed to improve the estimate, and there are two
+/// inputs where it destroys an estimate that was already exact: `x = 0` seeds
+/// `y = +inf` and `x = +inf` seeds `y = 0`, and the step `y * (1.5 - 0.5*x*y*y)`
+/// then evaluates `0 * inf`.  Returning the seed there is both the correct
+/// answer (rsqrt(0) is +inf, rsqrt(+inf) is 0) and the honest one.
+///
+/// `refined == refined` is false for a NaN lane on every backend - comparisons
+/// against NaN are false by the contract in backend.hpp - so it is the test,
+/// and no separate is_nan is needed.
+template <SimdVec V>
+[[nodiscard]] inline V keep_seed_on_nan(const V& seed, const V& refined) noexcept {
+    return V::select(refined == refined, refined, seed);
+}
+
+} // namespace detail
+
 /// `1/sqrt(x)`, refined from the hardware estimate.
 ///
 /// One Newton-Raphson step squares the error, so precision goes
@@ -32,6 +52,18 @@ namespace vectis::math {
 /// one step reaches 24 and single precision is done; AVX-512's rsqrt14 seeds at
 /// 14 bits, so double needs two steps (14 -> 28 -> 56) and that is what this
 /// does when T is double.
+///
+/// Domain: `x > 0`, where the result is accurate to about 1 ulp.  The endpoints
+/// are handled exactly rather than degenerating - `x = 0` gives `+inf` and
+/// `x = +inf` gives `0`, which is what the hardware estimate returns and what
+/// the Newton step would otherwise turn into a NaN.
+///
+/// A denormal `x` is outside what this can do, and the reason is the seed, not
+/// the refinement: the hardware estimate treats the denormal as zero, so `x =
+/// 1e-38` seeds `+inf` where the correct answer is about `1e19`, and the step
+/// then returns a non-finite value of the wrong sign.  Scale such an input into
+/// the normal range (multiply by a power of two, halve the result's exponent)
+/// before calling, or write the division out.
 ///
 /// One caveat worth knowing before reaching for this on AVX2 with double:
 /// that tier has no 64-bit reciprocal estimate, so the "seed" is a real
@@ -41,7 +73,8 @@ template <SimdVec V>
 [[nodiscard]] inline V rsqrt(const V& x) noexcept
     requires std::floating_point<typename V::value_type> {
     using T = typename V::value_type;
-    V y = x.rsqrt_approx();
+    const V seed = x.rsqrt_approx();
+    V y = seed;
     const V half = V::set1(T{0.5});
     const V one_and_a_half = V::set1(T{1.5});
     // y = y * (1.5 - 0.5*x*y*y)
@@ -49,22 +82,30 @@ template <SimdVec V>
     if constexpr (sizeof(T) == 8) {
         y = y * (one_and_a_half - half * x * y * y);
     }
-    return y;
+    return detail::keep_seed_on_nan(seed, y);
 }
 
 /// `1/x`, refined from the hardware estimate.
+///
+/// Domain: `x` finite, non-zero and normal, where the result is accurate to
+/// about 1 ulp.  The endpoints are exact: `x = 0` gives `+inf` (the hardware
+/// estimate, which the Newton step would otherwise turn into a NaN) and
+/// `x = +inf` gives `0`.  A denormal `x` is not usable - the estimate treats it
+/// as zero - so the result there is non-finite rather than the exact answer;
+/// see the note on rsqrt above.
 template <SimdVec V>
 [[nodiscard]] inline V rcp(const V& x) noexcept
     requires std::floating_point<typename V::value_type> {
     using T = typename V::value_type;
-    V y = x.rcp_approx();
+    const V seed = x.rcp_approx();
+    V y = seed;
     const V two = V::set1(T{2});
     // y = y * (2 - x*y)
     y = y * (two - x * y);
     if constexpr (sizeof(T) == 8) {
         y = y * (two - x * y);
     }
-    return y;
+    return detail::keep_seed_on_nan(seed, y);
 }
 
 /// The un-refined estimate, for callers who want the cheap version and know
@@ -96,8 +137,14 @@ template <SimdVec V>
 
 /// Linear interpolation, evaluated as `fma(t, b - a, a)`.
 ///
-/// This is the form that is exact at both ends: t=0 gives a and t=1 gives b
-/// bit-exactly, which the algebraically equivalent `a + t*(b-a)` does not.
+/// One rounding instead of the two that `a + t*(b-a)` costs, which is the whole
+/// reason for the fma spelling.  What it does *not* give is exactness at both
+/// ends, tempting as that claim is: `b - a` is rounded - and can overflow to
+/// infinity - before the fma sees it, so the ends are exact only when `b - a`
+/// is itself exact.  Concretely, `lerp(a, b, 0)` is `a` unless `b - a`
+/// overflowed (then it is `0 * inf`, a NaN), and `lerp(a, b, 1)` recovers `b`
+/// only when `b - a` was representable - `lerp(-1e30, 1.0, 1.0)` is `0`, not
+/// `1`.
 template <SimdVec V>
 [[nodiscard]] inline V lerp(const V& a, const V& b, const V& t) noexcept
     requires std::floating_point<typename V::value_type> {

@@ -79,6 +79,17 @@ void run_avx2() {
     vtest_battery::rcp_accuracy<avx2_abi>("avx2", 4);
     vtest_battery::padding_never_observed<avx2_abi>();
 
+    // The regression batteries.  These are the ones that would have caught the
+    // AVX2 mask factory shifting the wrong way; they live in the shared header
+    // and are called from every tier precisely because the tier they broke was
+    // the only one not testing them.
+    vtest_battery::mask_factories<avx2_abi>();
+    vtest_battery::mask_equality_is_observable_equality<avx2_abi>();
+    vtest_battery::reduce_agrees_with_oracle<avx2_abi>();
+    vtest_battery::integer_wrap_semantics<avx2_abi>();
+    vtest_battery::reciprocal_endpoints<avx2_abi>();
+    vtest_battery::per_lane_construction<avx2_abi>();
+
     // abs() on an unsigned lane is the identity, and must match the oracle.
     // This was a real bug: the signed vpabsd was being used for uint32 lanes,
     // so (uint32)-4 came back as 4 instead of 2^32-4.

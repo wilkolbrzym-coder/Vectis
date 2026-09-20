@@ -10,9 +10,11 @@
 //   VECTIS_TEST(name) { ... }     register a test
 //   CHECK(cond)                   record a failure, keep going
 //   CHECK_EQ(a, b)                record a failure with both values
-//   CHECK_NEAR(a, b, eps)         absolute tolerance
+//   CHECK_NEAR(a, b, eps)         absolute tolerance (exact equality passes)
 //   CHECK_ULP(a, b, max_ulp)      floating-point distance in ULPs
+//   CHECK_BITS(a, b)              exact bit-pattern equality (+0 vs -0)
 //   REQUIRE(cond)                 record a failure and stop this test
+//   vtest::skip("why"); return;   this test cannot run here - reported as skip
 //
 // ===========================================================================
 #pragma once
@@ -23,6 +25,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string_view>
+#include <type_traits>
 #include <vector>
 
 namespace vtest {
@@ -45,6 +48,23 @@ inline std::vector<test_case>& registry() {
 inline int& failure_count() { static int n = 0; return n; }
 inline int& check_count()   { static int n = 0; return n; }
 inline const char*& current_test() { static const char* n = ""; return n; }
+
+/// Set when the running test decided it cannot execute here.
+///
+/// A skipped test is not a passing test.  It used to be reported as `ok`
+/// because it records no failure, which made "2/2 tests passed (0 checks)" a
+/// normal thing to see in a log - a green result that ran nothing.  The runner
+/// prints `skip` and counts these separately instead.
+inline bool& skipped() { static bool s = false; return s; }
+inline int& skip_count() { static int n = 0; return n; }
+
+/// Declare that this test cannot run in this build or on this host, and say
+/// why.  Returns, so the idiom is `if (cond) { vtest::skip("reason"); return; }`.
+inline void skip(const char* why) {
+    skipped() = true;
+    ++skip_count();
+    std::printf("      skipped: %s\n", why);
+}
 
 struct registrar {
     registrar(const char* name, const char* file, int line, test_fn fn) {
@@ -105,10 +125,39 @@ template <class T, class U>
 inline bool check_near(T a, U b, double eps, const char* ea, const char* eb,
                        const char* file, int line) {
     ++check_count();
-    const double d = std::fabs(static_cast<double>(a) - static_cast<double>(b));
+    // The comparison and the subtraction are done in double explicitly: letting
+    // the usual arithmetic conversions do it would promote a float operand
+    // silently, which is what -Wdouble-promotion exists to catch.
+    const double da = static_cast<double>(a);
+    const double db = static_cast<double>(b);
+    // Equality first, because the subtraction below cannot express it for the
+    // infinities: `inf - inf` is NaN, so an infinite value would otherwise
+    // compare unequal to itself.
+    if (da == db) return true;
+    const double d = std::fabs(da - db);
     if (d <= eps) return true;
     char msg[640];
     std::snprintf(msg, sizeof msg, "|%s - %s| <= %g  (diff %.9g)", ea, eb, eps, d);
+    report_failure(msg, file, line);
+    return false;
+}
+
+/// Bit-pattern equality.  This is the only comparison that can tell `+0.0` from
+/// `-0.0`, which matters wherever the documented rule distinguishes them - the
+/// min/max semantics of the backends do, and ulp_distance cannot see it because
+/// it has to call them equal to be a useful distance for ordinary values.
+template <class T>
+inline bool check_bits(T a, T b, const char* ea, const char* eb,
+                       const char* file, int line) {
+    ++check_count();
+    using U = std::conditional_t<sizeof(T) == 4, std::uint32_t, std::uint64_t>;
+    const U ba = std::bit_cast<U>(a), bb = std::bit_cast<U>(b);
+    if (ba == bb) return true;
+    char msg[640];
+    std::snprintf(msg, sizeof msg,
+                  "%s has the same bit pattern as %s  (0x%llx vs 0x%llx)",
+                  ea, eb, static_cast<unsigned long long>(ba),
+                  static_cast<unsigned long long>(bb));
     report_failure(msg, file, line);
     return false;
 }
@@ -181,6 +230,10 @@ inline bool check_ulp(T a, T b, std::uint64_t max_ulp, const char* ea,
 
 #define CHECK_ULP(a, b, max_ulp)                                               \
     ::vtest::check_ulp((a), (b), (max_ulp), #a, #b, __FILE__, __LINE__)
+
+/// Exact bit-pattern equality: the only way to assert on the sign of zero.
+#define CHECK_BITS(a, b)                                                       \
+    ::vtest::check_bits((a), (b), #a, #b, __FILE__, __LINE__)
 
 #define REQUIRE(cond)                                                          \
     do {                                                                       \

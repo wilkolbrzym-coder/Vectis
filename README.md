@@ -74,7 +74,7 @@ using L = vectis::mem_layout<Particle, &Particle::x, &Particle::y, ...>;
 | AoS → SoA with **real reflection** (GCC 16, `-freflection`) | working — no field list, no annotations |
 | AoS → SoA without reflection, via pointer-to-member NTTPs | working |
 | Assembly layer (GAS `.S`, AVX2): `dot`, `saxpy`, `sum` | working, bit-parity tested |
-| Tests | 25 tests, ~78 000 assertions, green on GCC 15 and 16 |
+| Tests | 25 tests / ~72 000 assertions on GCC 15; 30 tests / ~80 000 with GCC 16's reflection enabled |
 | AVX-512 **execution** | **not verified here** — see below |
 
 ### The hardware this was built on
@@ -176,18 +176,21 @@ the one variable that matters.
 
 | kernel | ns | cycles/element | speedup |
 |---|---|---|---|
-| scalar, 1 accumulator | 1491 | 4.92 | 1.00x |
-| scalar, 4 accumulators | 679 | 1.73 | 2.05x |
+| scalar | 1491 | 4.92 | 1.00x |
+| scalar-4acc | 679 | 1.73 | 2.05x |
 | intrinsics | 107 | 0.338 | 13.93x |
-| **assembly** | **107** | **0.333** | **13.93x** |
+| **asm** | **107** | **0.333** | **13.93x** |
 
 **Assembly ties intrinsics exactly.** The generated inner loops are
 instruction-for-instruction identical — both compile to four `vmovups` /
 `vfmadd231ps` / four `vmovups` per 32 elements. Where assembly appeared to win
-by 1.3x (`saxpy` at n=1024), the cause was not better code: the C++ version was
-missing `restrict`, so GCC inserted runtime alias checks and a peeled prologue.
-Adding `restrict` moved it. At DRAM-resident sizes the gap vanishes entirely and
-assembly sometimes *loses* (0.92x).
+by 1.3x (`saxpy` at n=1024), part of the cause was not better code: the C++
+version was missing `restrict`, so GCC inserted runtime alias checks and a
+peeled prologue. The shipped twin carries `VECTIS_RESTRICT` now, and the gap at
+that size narrowed without closing — 100 ns against 132 ns, min of 21 runs,
+1.28x, measured on the development machine with the current sources. What is
+left is a small-n effect that has not been explained; it disappears at
+DRAM-resident sizes, where assembly sometimes *loses* (0.92x).
 
 The bigger finding is in the table's first two rows. **The 13.9x speedup is not
 about vector width.** A plain scalar loop with four independent accumulators —
@@ -217,7 +220,7 @@ vectorised:
 | 28 KiB (L1) | 1.00x | 1.61x | 1.37x | 1.00x |
 | 448 KiB (L2/L3) | 1.00x | 1.41x | 1.28x | 0.49x |
 | 7 MiB (L3) | 1.00x | 0.95x | 0.96x | 0.23x |
-| 114 MiB (DRAM) | 1.00x | 0.95x | 0.87x | 0.24x |
+| 112 MiB (DRAM) | 1.00x | 0.95x | 0.87x | 0.24x |
 
 Two conclusions, both unwelcome if you were hoping for a blanket win:
 
@@ -283,7 +286,7 @@ prints which tier a binary ended up with.
 
 Two workflows, with different jobs:
 
-* **`ci.yml`** — the gate, on every push and pull request. ISA tiers, six
+* **`ci.yml`** — the gate, on every push and pull request. ISA tiers, seven
   compilers, three language standards, six optimisation levels, standalone
   header compilation across two compilers × three standards × three tiers,
   an install-and-`find_package` consumer test, assembly parity with the layer
@@ -344,9 +347,12 @@ include/vectis/
   simd/math.hpp          rsqrt/rcp (refined), clamp/lerp/saturate/smoothstep
   simd/reduce.hpp        reductions, dot/length/normalize, chunked iteration
   soa/soa.hpp            AoS -> SoA via pointer-to-member descriptors
+  soa/reflect.hpp        the same, read from the struct itself (needs P2996)
+  simd/detail.hpp        bit-level and wrapping-arithmetic helpers
+  simd/backends.hpp      one include point for every available backend
   kernels/asm_kernels.hpp  asm declarations + intrinsics twins
 src/asm/avx2_kernels.S   hand-written kernels (GAS, AT&T syntax)
-tests/                   23 tests; battery shared across three TUs
+tests/                   registered suites; one battery shared across three TUs
 bench/                   asm-vs-intrinsics, vector-vs-scalar, SoA
 tools/cpuinfo.cpp        what this binary will use, and what the CPU can run
 ```

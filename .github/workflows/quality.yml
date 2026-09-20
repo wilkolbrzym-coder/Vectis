@@ -186,10 +186,22 @@ jobs:
         run: |
           # GCC's own analyzer, which needs no extra install and has been run
           # locally, unlike the two above.
-          for f in tests/test_simd_core.cpp tests/test_simd_avx2.cpp tests/test_soa.cpp; do
-            g++-14 -std=c++26 -O2 -march=x86-64-v3 -Iinclude -fanalyzer \
-                   -Wall -Wextra -fsyntax-only "$f"
+          #
+          # Two things this step got wrong before: `-fanalyzer` combined with
+          # `-fsyntax-only` analyses nothing (the analyzer is a middle-end pass,
+          # and -fsyntax-only stops after parsing, so the step could only ever
+          # report syntax errors), and the file list was a hand-written subset
+          # that quietly omitted the assembly-parity and reflection tests.  The
+          # list is derived now, and every file is really compiled.
+          fail=0
+          for f in $(find tests bench tools -name '*.cpp' ! -name 'test_main.cpp' | sort); do
+            echo "--- $f"
+            if ! g++-14 -std=c++26 -O2 -march=x86-64-v3 -Iinclude \
+                   -fanalyzer -Wall -Wextra -c "$f" -o /dev/null; then
+              fail=1
+            fi
           done
+          exit $fail
 
   # ---------------------------------------------------------------------------
   # Coverage.

@@ -43,14 +43,23 @@ struct backend<T, scalar_abi> {
     [[nodiscard]] static constexpr reg iota() noexcept { return T{0}; }
 
     // -------------------------------------------------------------- arithmetic
+    //
+    // Integer arithmetic goes through detail::wrap_*, not through `a + b`:
+    // the vector backends wrap because the hardware does, and this backend is
+    // the oracle they are compared against, so it must wrap as well.  Plain
+    // signed arithmetic would be UB at the boundary values instead - see the
+    // note in detail.hpp.
     [[nodiscard]] static constexpr reg add(reg a, reg b) noexcept {
-        return static_cast<T>(a + b);
+        if constexpr (std::integral<T>) return detail::wrap_add(a, b);
+        else return a + b;
     }
     [[nodiscard]] static constexpr reg sub(reg a, reg b) noexcept {
-        return static_cast<T>(a - b);
+        if constexpr (std::integral<T>) return detail::wrap_sub(a, b);
+        else return a - b;
     }
     [[nodiscard]] static constexpr reg mul(reg a, reg b) noexcept {
-        return static_cast<T>(a * b);
+        if constexpr (std::integral<T>) return detail::wrap_mul(a, b);
+        else return a * b;
     }
     [[nodiscard]] static constexpr reg div(reg a, reg b) noexcept
         requires std::floating_point<T> {
@@ -61,7 +70,8 @@ struct backend<T, scalar_abi> {
         return std::fma(a, b, c);
     }
     [[nodiscard]] static constexpr reg neg(reg a) noexcept {
-        return static_cast<T>(-a);
+        if constexpr (std::integral<T>) return detail::wrap_neg(a);
+        else return -a;
     }
     [[nodiscard]] static constexpr reg abs(reg a) noexcept {
         if constexpr (std::floating_point<T>) return detail::abs_bits(a);

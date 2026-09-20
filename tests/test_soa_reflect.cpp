@@ -47,6 +47,24 @@ struct Mixed {
     long  counter;
 };
 
+// The filters that are not about size, two of which were missing and each of
+// which failed in a place the caller could not act on: a `const float` member
+// passed is_arithmetic_type and became std::vector<const float>, which
+// libstdc++ rejects from inside <bits/stl_vector.h>, and a named bit-field
+// passed every check and then could not bind a reference in the descriptor
+// ("returning reference to temporary") in a header the caller never included.
+// Both are silent skips now, and the members around them keep their order.
+struct Obstructed {
+    unsigned int flags : 3;     // a bit-field is a data member, not a lane
+    const float  frozen;        // cv-qualified: std::vector cannot hold it
+    float        x;
+    volatile int v;
+    int          n;
+    float*       ptr;           // arithmetic? no - not a lane
+    short        s;             // two bytes: this one is a lane
+    char         c;             // one byte: not a lane
+};
+
 using L      = reflected_layout<Particle>;
 using F_x    = L::field_at<0>;
 using F_y    = L::field_at<1>;
@@ -110,6 +128,48 @@ VECTIS_TEST(reflect_filters_non_lane_members) {
     static_assert(std::is_same_v<LM::field_at<1>::type, int>);
     static_assert(std::is_same_v<LM::field_at<2>::type, double>);
     static_assert(std::is_same_v<LM::field_at<3>::type, long>);
+}
+
+/// The filters that are not tests of size, and each of which used to be a hard
+/// error inside a library header rather than a skip.
+///
+/// Asserting the count and the names, not merely that this compiles, is the
+/// point: the failures these filters prevent were a `std::vector<const float>`
+/// static assertion from <bits/stl_vector.h> and a "returning reference to
+/// temporary" from the descriptor, neither of which names the member that
+/// caused it.
+VECTIS_TEST(reflect_filters_what_cannot_be_a_lane) {
+    constexpr auto names = reflected_lane_names<Obstructed>();
+    CHECK_EQ(names.size(), 3u);
+    CHECK_EQ(names[0], std::string_view{"x"});
+    CHECK_EQ(names[1], std::string_view{"n"});
+    CHECK_EQ(names[2], std::string_view{"s"});
+
+    using LO = reflected_layout<Obstructed>;
+    static_assert(LO::count() == 3);
+    static_assert(std::is_same_v<LO::field_at<0>::type, float>);
+    static_assert(std::is_same_v<LO::field_at<1>::type, int>);
+    static_assert(std::is_same_v<LO::field_at<2>::type, short>);
+
+    // flags, frozen, x, v, n, ptr, s, c - in declaration order.
+    Obstructed o{5u, 1.5f, 2.5f, 3, 4, nullptr, static_cast<short>(6), 'z'};
+
+    soa_array<LO> soa(&o, 1);
+    CHECK_EQ(soa.size(), 1u);
+    CHECK_ULP(soa.data<LO::field_at<0>>()[0], 2.5f, 0);
+    CHECK_EQ(soa.data<LO::field_at<1>>()[0], 4);
+    CHECK_EQ(soa.data<LO::field_at<2>>()[0], short{6});
+
+    // The write-back touches the lanes and nothing else: the bit-field and the
+    // const member keep the values they were built with.
+    Obstructed back{0u, 9.5f, 0.0f, 0, 0, nullptr, short{0}, '\0'};
+    soa.to_aos(&back);
+    CHECK_ULP(back.x, 2.5f, 0);
+    CHECK_EQ(back.n, 4);
+    CHECK_EQ(back.s, short{6});
+    CHECK_EQ(back.flags, 0u);
+    CHECK_ULP(back.frozen, 9.5f, 0);
+    CHECK_EQ(back.c, '\0');
 }
 
 // ===========================================================================
@@ -211,8 +271,8 @@ VECTIS_TEST(reflect_vector_kernel_over_reflected_storage) {
 #else
 
 VECTIS_TEST(reflect_not_available) {
-    std::printf("      skipped: this compiler has no reflection "
-                "(needs GCC 16 with -freflection)\n");
+    vtest::skip("this compiler has no reflection "
+                "(needs GCC 16 with -freflection)");
 }
 
 #endif

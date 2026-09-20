@@ -36,7 +36,11 @@ int main() {
         std::printf("  %-22s %.*s\n", "cpu", static_cast<int>(b.size()), b.data());
     }
     row("architecture", VECTIS_ARCH_NAME);
-    row("compiler", VECTIS_COMPILER_NAME " " VECTIS_VERSION_STRING);
+    // The compiler's version, not the library's.  VECTIS_VERSION_STRING is the
+    // version of Vectis and already appears on the banner line above; this row
+    // is about the toolchain, and printing the wrong one here would mislead the
+    // CI log reader this tool exists for.
+    row("compiler", VECTIS_COMPILER_NAME " " VECTIS_COMPILER_VERSION_STRING);
 
     std::printf("\nruntime features\n");
     {

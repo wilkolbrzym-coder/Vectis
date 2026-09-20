@@ -130,7 +130,12 @@ jobs:
             echo "This runner has no AVX-512, so the tier is verified by compilation only."
           } >> $GITHUB_STEP_SUMMARY
 
+      # vectis-cpuinfo is compiled at the build's tier like everything else, so
+      # it cannot run on a machine that lacks that tier either - which is itself
+      # the answer it would have given, delivered as SIGILL.  Skip it in the one
+      # configuration where that is expected.
       - name: Confirm the binary's own view of itself
+        if: matrix.tier != 'avx512' || steps.cpu.outputs.avx512 == 'yes'
         run: ./build/tools/vectis-cpuinfo
 
   # ---------------------------------------------------------------------------
@@ -439,7 +444,7 @@ jobs:
           #include <cstdio>
           using namespace vectis;
           struct P { float x, y; };
-          using L = layout<P, &P::x, &P::y>;
+          using L = mem_layout<P, &P::x, &P::y>;
           int main() {
               float a[8]{1,2,3,4,5,6,7,8}, b[8]{8,7,6,5,4,3,2,1};
               const float d = dot(native_f32::load(a), native_f32::load(b));

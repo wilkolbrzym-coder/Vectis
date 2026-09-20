@@ -76,8 +76,17 @@ namespace detail {
 /// Two different folds are at work and they must not be confused: the register
 /// fold combines *vectors* with the backend's min/max, while the horizontal step
 /// combines *scalars*.  `better` is the scalar predicate - (candidate beats
-/// current) - written to match the hardware rule `(a < b) ? a : b` rather than
-/// std::min, so the answer is identical to what the vector path computes.
+/// current) - and it has to reproduce the hardware rule `(a < b) ? a : b`
+/// exactly, not approximate it with `candidate < current`.
+///
+/// The difference is which operand wins a tie, and it is observable without any
+/// NaN: scanning `[a, b]` left to right, the rule is `(a < b) ? a : b`, so `b`
+/// survives unless `a` strictly beats it - i.e. the predicate is `!(current <
+/// candidate)`.  The tempting `candidate < current` keeps `a` instead, which
+/// disagrees with the register fold on `-0.0` vs `+0.0` and on every NaN, and
+/// therefore makes reduce_min/reduce_max return different answers at different
+/// tiers for the same logical input.  The scalar backend is the oracle; this
+/// predicate is what keeps the horizontal step faithful to it.
 template <SimdVec V, class VecFold, class Better>
 [[nodiscard]] inline typename V::value_type
 reduce_ordered(const V& v, VecFold vec_fold, Better better) noexcept {
@@ -116,7 +125,7 @@ template <SimdVec V>
     using B = typename V::backend_type;
     return detail::reduce_ordered(
         v, [](auto a, auto b) { return B::min(a, b); },
-        [](auto candidate, auto current) { return candidate < current; });
+        [](auto candidate, auto current) { return !(current < candidate); });
 }
 
 template <SimdVec V>
@@ -124,7 +133,7 @@ template <SimdVec V>
     using B = typename V::backend_type;
     return detail::reduce_ordered(
         v, [](auto a, auto b) { return B::max(a, b); },
-        [](auto candidate, auto current) { return candidate > current; });
+        [](auto candidate, auto current) { return !(current > candidate); });
 }
 
 /// True when every lane satisfies the mask - the "did all of these pass" test

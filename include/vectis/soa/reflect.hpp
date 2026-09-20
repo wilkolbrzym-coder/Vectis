@@ -7,7 +7,7 @@
 //
 // The hand-written path in soa.hpp needs one pointer-to-member per field:
 //
-//     using L = layout<Particle, &Particle::x, &Particle::y, ...>;
+//     using L = mem_layout<Particle, &Particle::x, &Particle::y, ...>;
 //
 // That is a declaration per member, kept in sync by hand, and it silently goes
 // wrong the day somebody adds a field.  With P2996 the compiler reads the
@@ -53,21 +53,39 @@ namespace vectis {
 
 /// The data members of `type` that can occupy a vector lane.
 ///
-/// Public, non-static, arithmetic, not bool, at least two bytes - which is
-/// exactly what the Vectorizable concept means, spelled with reflection
-/// predicates because a concept cannot be queried directly from a consteval
-/// function in this implementation.
+/// Public, non-static, non-bit-field, unqualified, arithmetic, not bool, at
+/// least two bytes - which is what the Vectorizable concept means, spelled with
+/// reflection predicates because a concept cannot be queried directly from a
+/// consteval function in this implementation.
 ///
 /// Members that fail the filter are skipped rather than rejected, so a struct
 /// with a name string or a flags enum alongside its numbers still works: the
 /// numbers become lanes and the rest is ignored.
+///
+/// Three of those checks are not obvious and are each a real defect when
+/// missing, because the mistake surfaces as an error inside a header the caller
+/// never included rather than as a message about their struct:
+///
+///   * `is_bit_field` - a named bit-field is a data member and its type is
+///     arithmetic, so it passes every other check.  It cannot be a lane: the
+///     container stores `std::vector<unsigned>` and the descriptor's
+///     `get()`/`set()` cannot take a reference to a bit-field.
+///   * `is_const`/`is_volatile` - `is_arithmetic_type(const float)` is true, so
+///     a `const float` member would become `std::vector<const float>`, which
+///     libstdc++ rejects with "std::vector must have a non-const,
+///     non-volatile value_type" pointing into <bits/stl_vector.h>.
+///   * `is_public` after the access-context filter - `access_context::current()`
+///     has already excluded inaccessible members in this implementation, so
+///     this one is belt and braces rather than load-bearing.
 [[nodiscard]] consteval std::vector<std::meta::info>
 lane_members_of(std::meta::info type) {
     std::vector<std::meta::info> out;
     for (auto m : std::meta::nonstatic_data_members_of(
              type, std::meta::access_context::current())) {
         if (!std::meta::is_public(m)) continue;
+        if (std::meta::is_bit_field(m)) continue;
         const auto t = std::meta::type_of(m);
+        if (std::meta::is_const(t) || std::meta::is_volatile(t)) continue;
         if (!std::meta::is_arithmetic_type(t)) continue;
         if (std::meta::is_same_type(t, ^^bool)) continue;
         if (std::meta::size_of(t) < 2) continue;
@@ -121,6 +139,29 @@ namespace detail {
 /// Expands the reflected member list into `layout<T, reflected_field<...>...>`.
 template <class T>
 struct reflected_layout_builder {
+    /// The two ways this reflection is not the whole struct, stated here so
+    /// they are compile errors about the caller's type rather than silent
+    /// omissions that show up as wrong numbers later.
+    ///
+    /// `nonstatic_data_members_of` returns a type's *own* members only, so an
+    /// inherited field would simply not become a lane - and it cannot be added
+    /// by hand either, because `parent_of` on it names the base class, so the
+    /// descriptor would not satisfy FieldOf over the derived type.  Rejecting
+    /// the shape is the honest answer until bases are handled properly.
+    static_assert(std::meta::bases_of(^^T,
+                      std::meta::access_context::current()).empty(),
+        "vectis::reflected_layout: a type with a base class is not supported. "
+        "Reflection sees only a type's own data members, so an inherited field "
+        "would be silently missing from the layout. Declare the inherited "
+        "members in the derived type, or use mem_layout<> with an explicit "
+        "list of pointers to members.");
+
+    static_assert(lane_member_count(^^T) > 0,
+        "vectis::reflected_layout: this type has no member that can be a vector "
+        "lane. A lane has to be a public, non-static, unqualified, arithmetic "
+        "data member of at least two bytes - so no bool, no char, no pointer, "
+        "no string, no bit-field, no reference, and nothing inherited.");
+
     template <std::size_t... Is>
     static auto build(std::index_sequence<Is...>)
         -> layout<T, reflected_field<lane_member<T, Is>()>...>;

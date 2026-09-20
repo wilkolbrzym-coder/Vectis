@@ -58,6 +58,16 @@ void run_avx512() {
     vtest_battery::rcp_accuracy<avx512_abi>("avx512", 4);
     vtest_battery::padding_never_observed<avx512_abi>();
 
+    // The same regression batteries every tier runs.  Called here even though
+    // this TU cannot execute on most hosts: the day it does run, on a runner
+    // with AVX-512, the AVX-512 mask and reduction paths get them too.
+    vtest_battery::mask_factories<avx512_abi>();
+    vtest_battery::mask_equality_is_observable_equality<avx512_abi>();
+    vtest_battery::reduce_agrees_with_oracle<avx512_abi>();
+    vtest_battery::integer_wrap_semantics<avx512_abi>();
+    vtest_battery::reciprocal_endpoints<avx512_abi>();
+    vtest_battery::per_lane_construction<avx512_abi>();
+
     // A mask on AVX-512 is a general-purpose integer, so bits() is the identity
     // rather than a movemask.  The observable consequence is that a 16-lane
     // mask carries 16 bits with no truncation anywhere.

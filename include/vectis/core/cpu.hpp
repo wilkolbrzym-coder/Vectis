@@ -143,8 +143,11 @@ inline void cpuid(std::uint32_t leaf, std::uint32_t sub,
     r.avx = avx_in_hw && ymm_ok;
 
     if (max_leaf < 7) {
-        if (r.avx2 && r.fma) r.best = isa_level::avx2;
-        else if (r.sse42)    r.best = isa_level::sse42;
+        // No AVX2 test here: AVX2 is a leaf-7 feature, so a CPU that stops
+        // before leaf 7 cannot have it - and testing r.avx2 at this point would
+        // be reading a field that has not been assigned yet, which is a branch
+        // that can never be taken.
+        if (r.sse42) r.best = isa_level::sse42;
         return r;
     }
 
@@ -180,6 +183,29 @@ inline void cpuid(std::uint32_t leaf, std::uint32_t sub,
     if (max_sub >= 1) {
         cpuid(7, 1, a, b, c, d);
         r.avx512bf16 = bit(a, 5);
+    }
+
+    // The instructions existing and the OS having enabled them are different
+    // claims, and the second is what makes the first usable.  Without ZMM state
+    // in XCR0 the whole family is reported absent, sub-features included:
+    // describe() prints these bits, and a CPU whose kernel never enabled ZMM
+    // would otherwise be described as having AVX-512BW but not AVX-512F.
+    // GFNI, VAES and VPCLMULQDQ are deliberately not touched - all three have
+    // non-EVEX encodings and are usable without AVX-512.
+    if (!zmm_ok) {
+        r.avx512f = false;
+        r.avx512dq = false;
+        r.avx512ifma = false;
+        r.avx512cd = false;
+        r.avx512bw = false;
+        r.avx512vl = false;
+        r.avx512vbmi = false;
+        r.avx512vbmi2 = false;
+        r.avx512vnni = false;
+        r.avx512bitalg = false;
+        r.avx512vpopcntdq = false;
+        r.avx512fp16 = false;
+        r.avx512bf16 = false;
     }
 
     // The 512-bit tier requires the whole quartet, not F alone: byte-granular

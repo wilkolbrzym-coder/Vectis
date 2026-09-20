@@ -25,8 +25,22 @@ include(CheckCXXCompilerFlag)
 if(VECTIS_ON_X86)
     check_cxx_compiler_flag("-mavx2" VECTIS_CC_HAS_AVX2)
     if(VECTIS_CC_HAS_AVX2)
-        set_source_files_properties(test_simd_avx2.cpp PROPERTIES
-            COMPILE_OPTIONS "-mavx2;-mfma;-mno-avx512f;-mno-avx512bw;-mno-avx512dq;-mno-avx512vl")
+        # The AVX2 battery wants to be a *pure* 256-bit unit, which means
+        # disabling AVX-512 in it.  That is only safe to do when the tier does
+        # not already have AVX-512 turned on: on a machine whose -march=native
+        # reports AVX10.1-512, GCC 14 rejects -mno-avx512f outright with
+        # "-mno-evex512 cannot disable AVX10 instructions when AVX10.1-512 is
+        # available", and with -Werror that is a red build.  So the disable
+        # flags are added only for the explicit avx2 tier, where they cannot
+        # conflict; elsewhere the unit keeps its baseline, and nothing breaks
+        # because the backend uses explicit _mm256_* intrinsics regardless.
+        if(VECTIS_ISA_TIER STREQUAL "avx2")
+            set_source_files_properties(test_simd_avx2.cpp PROPERTIES
+                COMPILE_OPTIONS "-mavx2;-mfma;-mno-avx512f;-mno-avx512bw;-mno-avx512dq;-mno-avx512vl")
+        else()
+            set_source_files_properties(test_simd_avx2.cpp PROPERTIES
+                COMPILE_OPTIONS "-mavx2;-mfma")
+        endif()
     endif()
 endif()
 

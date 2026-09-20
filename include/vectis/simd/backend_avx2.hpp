@@ -30,11 +30,17 @@ namespace vectis::avx2_detail {
 [[nodiscard]] inline __m256i ones_epi32() noexcept { return _mm256_set1_epi32(-1); }
 
 /// Broadcast bit i of `bits` to every bit of 32-bit lane i.
+///
+/// The direction of the shift is the whole function: lane i must be tested
+/// against bit i, so the broadcast has to move that bit *down* into position 0
+/// before the mask is compared.  Shifting left instead puts bit 0 of `bits` in
+/// every lane's test position, which sets lane 0 and clears the rest - a mask
+/// factory that looks plausible and is wrong for 255 of 256 inputs.
 [[nodiscard]] inline __m256i bits_to_mask_epi32(std::uint64_t bits) noexcept {
     const __m256i one    = _mm256_set1_epi32(1);
     const __m256i bitpos = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
     const __m256i spread =
-        _mm256_sllv_epi32(_mm256_set1_epi32(static_cast<int>(bits)), bitpos);
+        _mm256_srlv_epi32(_mm256_set1_epi32(static_cast<int>(bits)), bitpos);
     return _mm256_cmpeq_epi32(_mm256_and_si256(spread, one), one);
 }
 
@@ -43,7 +49,7 @@ namespace vectis::avx2_detail {
     const __m256i one    = _mm256_set1_epi64x(1);
     const __m256i bitpos = _mm256_setr_epi64x(0, 1, 2, 3);
     const __m256i spread =
-        _mm256_sllv_epi64(_mm256_set1_epi64x(static_cast<long long>(bits)), bitpos);
+        _mm256_srlv_epi64(_mm256_set1_epi64x(static_cast<long long>(bits)), bitpos);
     return _mm256_cmpeq_epi64(_mm256_and_si256(spread, one), one);
 }
 

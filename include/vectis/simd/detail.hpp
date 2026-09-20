@@ -49,6 +49,42 @@ template <std::integral T>
 template <std::unsigned_integral T>
 [[nodiscard]] constexpr T abs_int(T a) noexcept { return a; }
 
+// ------------------------------------------------------- wrapping arithmetic
+//
+// Every SIMD backend's integer add/sub/mul/neg wraps: that is what the
+// hardware does, and the scalar backend is the oracle the vector ones are
+// checked against, so it has to wrap too.  Signed overflow is undefined in C++
+// ([expr.pre]/4), so writing `a + b` on int is not a description of wrapping -
+// the optimiser is entitled to assume it never happens.  The arithmetic is
+// carried out in the unsigned type of the same width, where wrapping is
+// defined, and converted back; C++20 defines that conversion as modular.
+
+template <std::integral T>
+[[nodiscard]] constexpr T wrap_add(T a, T b) noexcept {
+    using U = std::make_unsigned_t<T>;
+    return static_cast<T>(static_cast<U>(static_cast<U>(a) + static_cast<U>(b)));
+}
+
+template <std::integral T>
+[[nodiscard]] constexpr T wrap_sub(T a, T b) noexcept {
+    using U = std::make_unsigned_t<T>;
+    return static_cast<T>(static_cast<U>(static_cast<U>(a) - static_cast<U>(b)));
+}
+
+template <std::integral T>
+[[nodiscard]] constexpr T wrap_mul(T a, T b) noexcept {
+    using U = std::make_unsigned_t<T>;
+    return static_cast<T>(static_cast<U>(static_cast<U>(a) * static_cast<U>(b)));
+}
+
+/// Two's complement negation, valid at the minimum value of a signed type -
+/// where plain `-a` overflows and is UB.
+template <std::integral T>
+[[nodiscard]] constexpr T wrap_neg(T a) noexcept {
+    using U = std::make_unsigned_t<T>;
+    return static_cast<T>(U{0} - static_cast<U>(a));
+}
+
 /// Sign-bit-preserving absolute value, written the way the hardware does it:
 /// clear the top bit.  Branch-free, and NaN payloads survive untouched.
 template <class T>

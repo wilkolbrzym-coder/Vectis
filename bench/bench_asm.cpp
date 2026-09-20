@@ -31,11 +31,18 @@
 #  define VECTIS_BENCH_ASM 1
 #endif
 
+#include <cstdint>
+
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
 using namespace vectis;
+
+// Only the real benchmark needs these; the non-x86 stub below would compile
+// them and then be told they are unused, which -Werror does not forgive.
+#if defined(VECTIS_BENCH_ASM)
 
 namespace {
 
@@ -58,17 +65,18 @@ std::size_t parse_size(int argc, char** argv) {
     return 0;
 }
 
-} // namespace
-
-#if !defined(VECTIS_BENCH_ASM)
-
-int main() {
-    std::printf("\nvectis benchmark: asm vs intrinsics vs scalar\n");
-    std::printf("  SKIP: the assembly layer and its intrinsics twins are x86-only.\n");
-    return 0;
+/// `--quick` trims the size list, as it does in the other two benchmarks.  It
+/// has to be honoured here as well: the README documents it as a flag all three
+/// accept, and a benchmark that silently ignores it runs the 4M-element,
+/// DRAM-sized case anyway - which is the opposite of what was asked for.
+bool quick_requested(int argc, char** argv) {
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--quick") == 0) return true;
+    }
+    return false;
 }
 
-#else
+} // namespace
 
 int main(int argc, char** argv) {
     std::printf("\nvectis benchmark: asm vs intrinsics vs scalar\n");
@@ -95,9 +103,11 @@ int main(int argc, char** argv) {
     }
 
     const std::size_t forced = parse_size(argc, argv);
+    const bool quick = quick_requested(argc, argv);
     const std::vector<std::size_t> sizes =
         forced != 0 ? std::vector<std::size_t>{forced}
-                    : std::vector<std::size_t>{1024, 32768, 262144, 4194304};
+                    : (quick ? std::vector<std::size_t>{1024, 32768}
+                             : std::vector<std::size_t>{1024, 32768, 262144, 4194304});
 
     for (const std::size_t n : sizes) {
         std::vector<float> a(n), b(n), y(n);
@@ -120,13 +130,23 @@ int main(int argc, char** argv) {
                 if (std::strcmp(which, "scalar") == 0) {
                     return static_cast<double>(kernels::dot_f32_scalar(a.data(), b.data(), n));
                 }
+                if (std::strcmp(which, "scalar-4acc") == 0) {
+                    // The row the README's conclusion rests on: the same scalar
+                    // code with four independent accumulators, which is a
+                    // different summation order the programmer chose rather than
+                    // anything the compiler was allowed to do.  It has to be
+                    // measurable here, or that conclusion is unsupported.
+                    return static_cast<double>(
+                        kernels::dot_f32_scalar_4acc(a.data(), b.data(), n));
+                }
                 if (std::strcmp(which, "intrinsics") == 0) {
                     return static_cast<double>(kernels::dot_f32_intrinsics(a.data(), b.data(), n));
                 }
                 return static_cast<double>(vectis_asm_dot_f32(a.data(), b.data(), n));
             };
         };
-        vbench::compare(title, opt, {"scalar", "intrinsics", "asm"}, make_dot);
+        vbench::compare(title, opt, {"scalar", "scalar-4acc", "intrinsics", "asm"},
+                        make_dot);
 
         opt.bytes = n * 4 * 3;      // two reads + one write
         char title2[128];
@@ -149,6 +169,14 @@ int main(int argc, char** argv) {
 
     vbench::note("min of 21 runs; cycles/elem from rdtsc across the whole batch");
     vbench::total_sink();
+    return 0;
+}
+
+#else
+
+int main() {
+    std::printf("\nvectis benchmark: asm vs intrinsics vs scalar\n");
+    std::printf("  SKIP: the assembly layer and its intrinsics twins are x86-only.\n");
     return 0;
 }
 

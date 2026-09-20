@@ -20,16 +20,32 @@
 #define VECTIS_VERSION_STRING "0.1.0"
 
 // ------------------------------------------------------------------ compiler
+//
+// Two spellings of the compiler's version: the number, for comparisons, and the
+// string, for reports.  A diagnostic that prints the *library* version on a row
+// labelled "compiler" is worse than printing nothing, so both are here and the
+// tools use the string.
+#define VECTIS_DETAIL_STRINGIFY_(x) #x
+#define VECTIS_DETAIL_STRINGIFY(x) VECTIS_DETAIL_STRINGIFY_(x)
+
 #if defined(__clang__)
 #  define VECTIS_COMPILER_CLANG 1
 #  define VECTIS_COMPILER_NAME "clang"
 #  define VECTIS_COMPILER_VERSION \
       (__clang_major__ * 10000 + __clang_minor__ * 100 + __clang_patchlevel__)
+#  define VECTIS_COMPILER_VERSION_STRING \
+      VECTIS_DETAIL_STRINGIFY(__clang_major__) "." \
+      VECTIS_DETAIL_STRINGIFY(__clang_minor__) "." \
+      VECTIS_DETAIL_STRINGIFY(__clang_patchlevel__)
 #elif defined(__GNUC__)
 #  define VECTIS_COMPILER_GCC 1
 #  define VECTIS_COMPILER_NAME "gcc"
 #  define VECTIS_COMPILER_VERSION \
       (__GNUC__ * 10000 + __GNUC_MINOR__ * 100 + __GNUC_PATCHLEVEL__)
+#  define VECTIS_COMPILER_VERSION_STRING \
+      VECTIS_DETAIL_STRINGIFY(__GNUC__) "." \
+      VECTIS_DETAIL_STRINGIFY(__GNUC_MINOR__) "." \
+      VECTIS_DETAIL_STRINGIFY(__GNUC_PATCHLEVEL__)
 #else
 #  error "Vectis: unsupported compiler (GCC or Clang required)"
 #endif

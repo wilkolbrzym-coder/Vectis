@@ -33,6 +33,7 @@
 #include <cstdio>
 #include <limits>
 #include <type_traits>
+#include <vector>
 
 namespace vtest_battery {
 
@@ -326,6 +327,11 @@ void canaries() {
 
 /// min(a,b) is (a<b)?a:b, NOT std::fmin.  The difference is observable with a
 /// NaN in the first operand and with the sign of zero.
+///
+/// CHECK_BITS, not CHECK_ULP: `ulp_distance` has to report `+0.0` and `-0.0` as
+/// zero apart to be a useful distance for ordinary values, which made the two
+/// `±0` lanes below - the ones this rule exists to distinguish - pass whichever
+/// zero came back.  Only a bit-pattern comparison tests it.
 template <class Abi>
 void nan_and_zero_semantics() {
     using V = basic_vec<float, 8, Abi>;
@@ -339,8 +345,8 @@ void nan_and_zero_semantics() {
     for (std::size_t i = 0; i < 8; ++i) {
         const float want_min = (a[i] < b[i]) ? a[i] : b[i];
         const float want_max = (a[i] > b[i]) ? a[i] : b[i];
-        CHECK_ULP(mn[i], want_min, 0);
-        CHECK_ULP(mx[i], want_max, 0);
+        CHECK_BITS(mn[i], want_min);
+        CHECK_BITS(mx[i], want_max);
     }
 }
 
@@ -415,6 +421,272 @@ void padding_never_observed() {
     CHECK_EQ(Vf5::mask_type::lane_mask(), 0x1Fu);
 }
 
+// ===========================================================================
+// Regression batteries
+//
+// Every check below exists because the bug it catches shipped, or was one
+// commit away from shipping, with a green suite.  They are grouped here rather
+// than folded into the battery above so the reason each one exists stays
+// readable, and so a failure names the property that broke.
+// ===========================================================================
+
+/// Bit patterns worth feeding a mask factory: exhaustive when the shape is
+/// small enough to be, a spread of awkward ones when it is not.
+template <std::size_t N>
+std::vector<std::uint64_t> mask_patterns() {
+    const std::uint64_t all =
+        (N >= 64) ? ~std::uint64_t{0} : ((std::uint64_t{1} << N) - 1);
+    std::vector<std::uint64_t> out;
+    if constexpr (N <= 8) {
+        for (std::uint64_t b = 0; b <= all; ++b) out.push_back(b);
+    } else {
+        out.push_back(0);
+        out.push_back(all);
+        out.push_back(all / 3);
+        out.push_back(0xAAAA'AAAA'AAAA'AAAAull & all);
+        out.push_back(0x5555'5555'5555'5555ull & all);
+        for (std::size_t i = 0; i < N; ++i) out.push_back(std::uint64_t{1} << i);
+    }
+    return out;
+}
+
+/// Every mask factory must return exactly the predicate it was asked for, at
+/// every lane, on every tier.
+///
+/// This battery exists because it did not: the AVX2 backend shifted the
+/// broadcast bit pattern the wrong way, so `from_bits` returned a mask with at
+/// most lane 0 set and `from_lane(1)` returned nothing at all.  254 of 256
+/// eight-bit patterns were wrong and the suite was green, because the only
+/// assertions on these factories lived in the AVX-512 translation unit - which
+/// is skipped on any host that has no AVX-512.  The factories are
+/// ABI-independent by contract, so the check belongs here, where every tier
+/// inherits it and a host without AVX-512 still runs it.
+template <class T, std::size_t N, class Abi>
+void mask_factory_check() {
+    using M = basic_mask<T, N, Abi>;
+    static_assert(N <= 64, "mask_factory_check assumes bits() fits one word");
+
+    const std::uint64_t all =
+        (N >= 64) ? ~std::uint64_t{0} : ((std::uint64_t{1} << N) - 1);
+
+    for (const std::uint64_t b : mask_patterns<N>()) {
+        CHECK_EQ(M::from_bits(b).bits(), b);
+    }
+
+    // Each single lane, both directions: what the factory says and what the
+    // observer then reports.
+    for (std::size_t i = 0; i < N; ++i) {
+        const M one = M::from_lane(i);
+        CHECK_EQ(one.bits(), std::uint64_t{1} << i);
+        CHECK(one.test(i));
+        CHECK_EQ(one.count(), 1u);
+        CHECK(one.any());
+        CHECK(!one.none());
+    }
+
+    CHECK_EQ(M::full().bits(), all);
+    CHECK(M::full().all());
+    CHECK_EQ(M::full().count(), N);
+    CHECK(M::from_bits(all).all());
+    CHECK(M::from_lane(N).none());        // out of range: an empty mask
+    CHECK_EQ(M::from_bits(0).count(), 0u);
+}
+
+template <class Abi>
+void mask_factories() {
+    mask_factory_check<float, 8, Abi>();
+    mask_factory_check<float, 6, Abi>();        // partial final register
+    mask_factory_check<float, 3, Abi>();
+    mask_factory_check<float, 1, Abi>();
+    mask_factory_check<double, 4, Abi>();
+    mask_factory_check<std::int32_t, 5, Abi>();
+    mask_factory_check<std::uint64_t, 3, Abi>();
+}
+
+/// `operator==` on a mask must mean what every other observer means.
+///
+/// The padding lanes of a partially-filled final register hold a real
+/// predicate, so comparing the raw registers lets two masks that agree on every
+/// lane the caller can see - same bits(), same count(), same test(i) for every
+/// i - compare unequal.  A mask built by a comparison seeds its padding with
+/// the comparison's result; one built by from_bits leaves it clear.  Both are
+/// the "all lanes true" mask of a six-lane vector.
+template <class Abi>
+void mask_equality_is_observable_equality() {
+    using V = basic_vec<float, 6, Abi>;         // 6 of 8 lanes when R == 8
+    using M = typename V::mask_type;
+
+    const std::array<float, 6> in{0.f, 1.f, 2.f, 3.f, 4.f, 5.f};
+    const V v = V::load(in.data());
+
+    const M from_cmp = (v == v);
+    const M from_fac = M::from_bits(M::lane_mask());
+
+    CHECK_EQ(from_cmp.bits(), from_fac.bits());
+    CHECK_EQ(from_cmp.count(), from_fac.count());
+    for (std::size_t i = 0; i < 6; ++i) {
+        CHECK_EQ(from_cmp.test(i), from_fac.test(i));
+    }
+    CHECK(from_cmp == from_fac);
+    CHECK(!(from_cmp != from_fac));
+
+    const M low3 = (v < V::set1(3.0f));
+    CHECK_EQ(low3.bits(), 0x07u);
+    CHECK(low3 == M::from_bits(0x07u));
+    CHECK(low3 != M::from_bits(0x08u));
+    CHECK(!(low3 == M::from_bits(0x08u)));
+}
+
+/// reduce_min/reduce_max must return the same answer at every tier for the same
+/// logical input.  The scalar backend is the oracle, so anything else is a bug
+/// in the horizontal step.
+///
+/// The register fold uses the hardware rule `(a<b) ? a : b`; the horizontal
+/// step is a separate fold over scalars and was written with
+/// `candidate < current`, which keeps the *left* operand instead of the right
+/// one.  Nothing is needed to observe the difference but a tie or a NaN:
+/// `reduce_min([-0.0, +0.0, ...])` was `-0.0` on AVX2 and `+0.0` on scalar, and
+/// `reduce_min([NaN, 1, ...])` was NaN on one and 1 on the other.  CHECK_BITS,
+/// not CHECK_ULP, because the sign of zero is the whole point and ulp_distance
+/// deliberately reports it as zero.
+template <class Abi>
+void reduce_agrees_with_oracle() {
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float inf = std::numeric_limits<float>::infinity();
+
+    const std::array<std::array<float, 8>, 9> cases{{
+        {nan, 1.f, 2.f, 3.f, 4.f, 5.f, 6.f, 7.f},        // NaN first
+        {1.f, 2.f, 3.f, 4.f, 5.f, 6.f, 7.f, nan},        // NaN last
+        {1.f, nan, 2.f, 3.f, nan, 5.f, 6.f, 7.f},        // NaN in the middle
+        {nan, nan, nan, nan, nan, nan, nan, nan},
+        {-0.0f, 0.0f, 2.f, 3.f, 4.f, 5.f, 6.f, 7.f},     // -0 vs +0 tie
+        {0.0f, -0.0f, 2.f, 3.f, 4.f, 5.f, 6.f, 7.f},
+        {-0.0f, -0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f},
+        {-inf, inf, 0.f, -1.f, 2.f, -3.f, 4.f, -5.f},
+        {3.f, 3.f, 3.f, 3.f, 3.f, 3.f, 3.f, 3.f},        // every lane equal
+    }};
+
+    for (const auto& in : cases) {
+        const auto vn = basic_vec<float, 8, Abi>::load(in.data());
+        const auto vs = basic_vec<float, 8, scalar_abi>::load(in.data());
+        CHECK_BITS(reduce_min(vn), reduce_min(vs));
+        CHECK_BITS(reduce_max(vn), reduce_max(vs));
+    }
+
+    // A vector whose lane count does not fill its register takes the other path
+    // through the horizontal step, so the tie has to be checked there too.
+    const std::array<float, 5> partial{-0.0f, 0.0f, 1.0f, 2.0f, 3.0f};
+    const auto pn = basic_vec<float, 5, Abi>::load(partial.data());
+    const auto ps = basic_vec<float, 5, scalar_abi>::load(partial.data());
+    CHECK_BITS(reduce_min(pn), reduce_min(ps));
+    CHECK_BITS(reduce_max(pn), reduce_max(ps));
+}
+
+/// Integer add/sub/mul/neg wrap at the boundary values, as the hardware does.
+///
+/// The scalar backend used to compute these with ordinary signed arithmetic,
+/// where overflow is UB - so the oracle the vector backends are compared
+/// against had undefined behaviour exactly where it mattered most, at INT_MIN
+/// and INT_MAX.  Nothing observed it until UBSan did.  These are the inputs
+/// that make it visible, and they run on the scalar tier too.
+///
+/// Driven through the vector interface, not through the backend's static
+/// functions: a register is a `__m256i` on AVX2 and a plain `T` on the scalar
+/// tier, so `backend<T,Abi>::add(hi, one)` is not even expressible.  One lane
+/// holds the boundary value and lane 0 is what gets read.
+template <class T, class Abi>
+void integer_wrap_check() {
+    static_assert(std::is_integral_v<T>);
+    using V = basic_vec<T, 2, Abi>;
+    using U = std::make_unsigned_t<T>;
+
+    constexpr T lo = std::numeric_limits<T>::min();
+    constexpr T hi = std::numeric_limits<T>::max();
+
+    const auto lane0 = [](const V& v) { return v.to_array()[0]; };
+
+    CHECK_EQ(lane0(V::set1(hi) + V::set1(T{1})), lo);
+    CHECK_EQ(lane0(V::set1(lo) - V::set1(T{1})), hi);
+    CHECK_EQ(lane0(V::set1(lo) + V::set1(lo)), T{0});
+    CHECK_EQ(lane0(-V::set1(lo)), lo);            // min is its own negation
+    CHECK_EQ(lane0(V::zero() - V::set1(lo)), lo);
+
+    if constexpr (BackendHasMul<T, Abi>) {
+        CHECK_EQ(lane0(V::set1(hi) * V::set1(T{2})),
+                 static_cast<T>(static_cast<U>(hi) * U{2}));
+        CHECK_EQ(lane0(V::set1(lo) * V::set1(static_cast<T>(U{0} - U{1}))), lo);
+    }
+}
+
+template <class Abi>
+void integer_wrap_semantics() {
+    integer_wrap_check<std::int32_t, Abi>();
+    integer_wrap_check<std::uint32_t, Abi>();
+    integer_wrap_check<std::int64_t, Abi>();
+    integer_wrap_check<std::uint64_t, Abi>();
+}
+
+/// The endpoints of the refined reciprocal functions.
+///
+/// The Newton step is only allowed to improve the estimate.  It did not:
+/// `x = 0` seeds `+inf` and `x = +inf` seeds `0`, and `y * (1.5 - 0.5*x*y*y)`
+/// turns both into a NaN, so `rsqrt(0)` - and therefore `normalize` of a zero
+/// vector - returned NaN while the un-refined estimate one line above was
+/// exactly right.  The finite cases are covered by the accuracy batteries; this
+/// is the boundary they leave out.
+template <class Abi>
+void reciprocal_endpoints() {
+    using V = basic_vec<float, 4, Abi>;
+    const float inf = std::numeric_limits<float>::infinity();
+
+    const auto rs_zero = math::rsqrt(V::set1(0.0f)).to_array();
+    const auto rs_inf  = math::rsqrt(V::set1(inf)).to_array();
+    const auto rc_zero = math::rcp(V::set1(0.0f)).to_array();
+    const auto rc_inf  = math::rcp(V::set1(inf)).to_array();
+
+    for (std::size_t i = 0; i < 4; ++i) {
+        CHECK_BITS(rs_zero[i], inf);
+        CHECK_BITS(rs_inf[i], 0.0f);
+        CHECK_BITS(rc_zero[i], inf);
+        CHECK_BITS(rc_inf[i], 0.0f);
+    }
+}
+
+/// A vector built lane by lane must hold exactly those lanes.
+///
+/// The constructor loaded a whole register out of an `std::array<T, N>` for
+/// every register, so a vector whose lane count does not fill its last register
+/// read past the end of that array - a stack over-read of `reg_lanes -
+/// tail_lanes` elements, measured by AddressSanitizer, with the garbage landing
+/// in the padding lanes where it also made the mask comparison above
+/// non-deterministic.  This is the value-level half of that check; the canaries
+/// cover the load/store half.
+template <class Abi>
+void per_lane_construction() {
+    {
+        const basic_vec<float, 6, Abi> v{1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
+        const auto a = v.to_array();
+        for (std::size_t i = 0; i < 6; ++i) {
+            CHECK_EQ(a[i], static_cast<float>(i) + 1.0f);
+        }
+    }
+    {
+        const auto v = basic_vec<std::int32_t, 5, Abi>{10, 20, 30, 40, 50};
+        const auto a = v.to_array();
+        for (std::size_t i = 0; i < 5; ++i) {
+            CHECK_EQ(a[i], static_cast<std::int32_t>(i + 1) * 10);
+        }
+    }
+    {
+        // A lane count that is not even a whole number of registers.
+        const auto v = basic_vec<double, 3, Abi>{0.5, 1.5, 2.5};
+        const auto a = v.to_array();
+        CHECK_EQ(a[0], 0.5);
+        CHECK_EQ(a[1], 1.5);
+        CHECK_EQ(a[2], 2.5);
+    }
+}
+
 // ------------------------------------------------------------ entry points
 
 inline void run_scalar_all() {
@@ -424,6 +696,12 @@ inline void run_scalar_all() {
     rsqrt_accuracy<scalar_abi>("scalar", 1);
     rcp_accuracy<scalar_abi>("scalar", 1);
     padding_never_observed<scalar_abi>();
+    mask_factories<scalar_abi>();
+    mask_equality_is_observable_equality<scalar_abi>();
+    reduce_agrees_with_oracle<scalar_abi>();
+    integer_wrap_semantics<scalar_abi>();
+    reciprocal_endpoints<scalar_abi>();
+    per_lane_construction<scalar_abi>();
 }
 
 /// The baseline backend: whatever this translation unit was built for.
@@ -432,6 +710,12 @@ inline void run_native_all() {
     canaries<native_abi>();
     nan_and_zero_semantics<native_abi>();
     padding_never_observed<native_abi>();
+    mask_factories<native_abi>();
+    mask_equality_is_observable_equality<native_abi>();
+    reduce_agrees_with_oracle<native_abi>();
+    integer_wrap_semantics<native_abi>();
+    reciprocal_endpoints<native_abi>();
+    per_lane_construction<native_abi>();
 }
 
 } // namespace vtest_battery
