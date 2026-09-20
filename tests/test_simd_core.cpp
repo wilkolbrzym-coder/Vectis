@@ -7,6 +7,7 @@
 // explanation at the top of simd_battery.hpp for why it cannot live here.
 //
 // ===========================================================================
+#include "backend_batteries.hpp"
 #include "simd_battery.hpp"
 #include "vectis_test.hpp"
 
@@ -199,6 +200,45 @@ VECTIS_TEST(simd_for_each_chunk_handles_ragged_tail) {
 }
 
 // ===========================================================================
+// The ISA-specific batteries, entered only from here
+// ===========================================================================
+//
+// The capability check lives in THIS translation unit, which is compiled for
+// the portable tier.  It has to: a TU compiled with -mavx512f may contain
+// AVX-512 instructions in every function it defines, including a function that
+// only asks whether AVX-512 is available - so a guard inside such a TU can
+// fault before it returns false.  Asking here and crossing into that TU through
+// a call is the only ordering that is actually safe.
+
+namespace {
+
+void report_skip(const char* tier, bool built, bool supported) {
+    if (!built) {
+        std::printf("      skipped: the %s battery was not compiled into this "
+                    "build\n", tier);
+    } else if (!supported) {
+        std::printf("      skipped: host has no %s (compiled and linked, never "
+                    "executed here)\n", tier);
+    }
+}
+
+} // namespace
+
+VECTIS_TEST(simd_core_avx2) {
+    const bool built = vtest_batteries::avx2_battery_built();
+    const bool ok    = cpu::has(isa_level::avx2);
+    report_skip("AVX2", built, ok);
+    if (built && ok) vtest_batteries::run_avx2();
+}
+
+VECTIS_TEST(simd_core_avx512) {
+    const bool built = vtest_batteries::avx512_battery_built();
+    const bool ok    = cpu::has(isa_level::avx512);
+    report_skip("AVX-512", built, ok);
+    if (built && ok) vtest_batteries::run_avx512();
+}
+
+// ===========================================================================
 // Canaries, as their own test names so `ctest -R canary` isolates them
 // ===========================================================================
 
@@ -210,3 +250,10 @@ VECTIS_TEST(simd_canary_native) {
     vtest_battery::canaries<native_abi>();
 }
 
+VECTIS_TEST(simd_canary_avx512) {
+    if (!vtest_batteries::avx512_battery_built() || !cpu::has(isa_level::avx512)) {
+        std::printf("      skipped: no AVX-512 here\n");
+        return;
+    }
+    vtest_batteries::run_avx512_canaries();
+}

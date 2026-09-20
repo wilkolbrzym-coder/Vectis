@@ -1,5 +1,5 @@
 // ===========================================================================
-// Vectis - AVX-512 battery, in its own translation unit
+// Vectis - AVX-512 battery (compiled for AVX-512; see backend_batteries.hpp)
 // ===========================================================================
 //
 // This file is compiled with `-mavx512f -mavx512bw -mavx512dq -mavx512vl`,
@@ -19,59 +19,44 @@
 // which is exactly the hardware the machine in front of you does not have.
 //
 // ===========================================================================
+#include "backend_batteries.hpp"
 #include "simd_battery.hpp"
-#include "vectis_test.hpp"
 
 #include <vectis/core/cpu.hpp>
 #include <vectis/simd/reduce.hpp>
 #include <vectis/simd/vec.hpp>
 
-#include <cstdio>
+#include <cstdint>
 
 using namespace vectis;
 
 #if defined(VECTIS_USE_AVX512)
 
-namespace {
+// Avalanche of shape facts that only exist at this width.
+static_assert(basic_vec<float, 8, avx512_abi>::num_regs == 1);
+static_assert(basic_vec<float, 8, avx512_abi>::tail_lanes == 8);
+static_assert(basic_vec<float, 16, avx512_abi>::num_regs == 1);
+static_assert(basic_vec<float, 16, avx512_abi>::tail_lanes == 0);
+static_assert(basic_vec<float, 32, avx512_abi>::num_regs == 2);
+static_assert(basic_vec<double, 8, avx512_abi>::num_regs == 1);
+static_assert(basic_vec<std::int32_t, 16, avx512_abi>::num_regs == 1);
+static_assert(basic_vec<std::int64_t, 8, avx512_abi>::num_regs == 1);
 
-void run_avx512_all() {
+// The 64-bit integer operations AVX2 lacks, which AVX-512 supplies in full.
+static_assert(BackendHasMul<std::int64_t, avx512_abi>);
+static_assert(BackendHasMinMax<std::int64_t, avx512_abi>);
+static_assert(BackendHasOrdering<std::int64_t, avx512_abi>);
+static_assert(BackendHasReciprocal<double, avx512_abi>);
+
+namespace vtest_batteries {
+
+void run_avx512() {
     vtest_battery::full_battery<avx512_abi>();
     vtest_battery::canaries<avx512_abi>();
     vtest_battery::nan_and_zero_semantics<avx512_abi>();
     vtest_battery::rsqrt_accuracy<avx512_abi>("avx512", 4);
     vtest_battery::rcp_accuracy<avx512_abi>("avx512", 4);
     vtest_battery::padding_never_observed<avx512_abi>();
-}
-
-bool host_has_avx512() {
-    return cpu::has(isa_level::avx512);
-}
-
-} // namespace
-
-VECTIS_TEST(simd_core_avx512) {
-    if (!host_has_avx512()) {
-        std::printf("      skipped: host has no AVX-512 (compiled and linked, "
-                    "never executed here)\n");
-        return;
-    }
-    run_avx512_all();
-}
-
-VECTIS_TEST(simd_canary_avx512) {
-    if (!host_has_avx512()) {
-        std::printf("      skipped: host has no AVX-512\n");
-        return;
-    }
-    vtest_battery::canaries<avx512_abi>();
-}
-
-/// Things that are only true on the widest tier, asserted where they can be.
-VECTIS_TEST(simd_avx512_specific_properties) {
-    if (!host_has_avx512()) {
-        std::printf("      skipped: host has no AVX-512\n");
-        return;
-    }
 
     // A mask on AVX-512 is a general-purpose integer, so bits() is the identity
     // rather than a movemask.  The observable consequence is that a 16-lane
@@ -95,21 +80,30 @@ VECTIS_TEST(simd_avx512_specific_properties) {
     for (std::size_t i = 0; i < 8; ++i) CHECK_EQ(prod[i], a[i] * 2);
 
     const auto mn = I64::load(a.data()).min(I64::load(b.data())).to_array();
-    for (std::size_t i = 0; i < 8; ++i) CHECK_EQ(mn[i], a[i] < b[i] ? a[i] : b[i]);
+    for (std::size_t i = 0; i < 8; ++i) {
+        CHECK_EQ(mn[i], a[i] < b[i] ? a[i] : b[i]);
+    }
 
     const auto lt = (I64::load(a.data()) < I64::load(b.data())).bits();
     std::uint64_t want = 0;
-    for (std::size_t i = 0; i < 8; ++i) if (a[i] < b[i]) want |= (1ull << i);
+    for (std::size_t i = 0; i < 8; ++i) {
+        if (a[i] < b[i]) want |= (std::uint64_t{1} << i);
+    }
     CHECK_EQ(lt, want);
 }
 
+void run_avx512_canaries() { vtest_battery::canaries<avx512_abi>(); }
+
+bool avx512_battery_built() noexcept { return true; }
+
+} // namespace vtest_batteries
+
 #else
 
-// The build did not enable AVX-512, so there is nothing to instantiate.  Say so
-// rather than silently having no coverage.
-VECTIS_TEST(simd_core_avx512) {
-    std::printf("      skipped: this translation unit was not built with "
-                "AVX-512 flags\n");
-}
+namespace vtest_batteries {
+void run_avx512() {}
+void run_avx512_canaries() {}
+bool avx512_battery_built() noexcept { return false; }
+} // namespace vtest_batteries
 
 #endif

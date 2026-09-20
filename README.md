@@ -72,9 +72,13 @@ BMI2, AES, PCLMULQDQ — and **no AVX-512 at all**. So:
   verified (it emits `zmm` registers and `vfmadd132ps`), but it **cannot be
   executed here**. Running a tier-`avx512` binary on this CPU dies with SIGILL,
   which is the expected result and not a bug.
-* Executing the AVX-512 tests is what CI is for: GitHub's `ubuntu` runners are
-  usually Xeon Platinum (Ice Lake-SP) and have the full AVX-512 quartet plus
-  VBMI2, VNNI and IFMA.
+* **GitHub's hosted runners do not have AVX-512 either.** This was verified the
+  hard way: the first CI runs died with `vectis_avx512 (ILLEGAL)` on every
+  runner, because the assumption that `ubuntu-24.04` lands on Ice Lake-SP is
+  wrong for the current runner pool. So the AVX-512 backend is currently
+  verified by *compilation and code generation* only, everywhere. Running it
+  needs a machine you have to bring yourself - a self-hosted runner, or a cloud
+  instance on Sapphire Rapids, Ice Lake or Zen 4/5.
 
 The working set is also small — 32 KiB L1d, 256 KiB L2, 6 MiB L3 — and the
 governor is `powersave`, so absolute timings below are noisy and optimistic
@@ -261,6 +265,13 @@ Two workflows, with different jobs:
   an install-and-`find_package` consumer test, assembly parity with the layer
   both on and off, and aarch64 plus two macOS runners. Every job names what it
   defends against. A final `gate` job aggregates them for branch protection.
+
+  One rule learned from a red run: **a capability check must live in code
+  compiled for the lowest tier you support.** The AVX-512 tests used to guard
+  themselves from inside the AVX-512 translation unit, where the check itself
+  may be compiled to AVX-512 instructions and can fault before it returns
+  false. The check now happens in the portable unit, which crosses into the
+  AVX-512 unit through an exported call only after the answer is known.
 * **`quality.yml`** — the deeper pass, on pull requests and weekly. ASan+UBSan,
   TSan, `_GLIBCXX_DEBUG`, `_GLIBCXX_ASSERTIONS`, `_FORTIFY_SOURCE=3`, clang-tidy,
   cppcheck, GCC's `-fanalyzer`, coverage, and a benchmark smoke run.
@@ -320,9 +331,12 @@ tools/cpuinfo.cpp        what this binary will use, and what the CPU can run
 
 ## Known limitations
 
-* **AVX-512 execution is unverified on the development machine.** Code
-  generation is verified; behaviour is CI's job. Until a CI run goes green on a
-  Xeon runner, treat the AVX-512 backend as compiled-but-unproven.
+* **The AVX-512 backend has never been executed anywhere.** Its code generation
+  is verified - it emits `zmm`, `vpcmp`, `vrsqrt14ps` and `vpternlogd` - and it
+  builds clean on every compiler in the matrix, but no machine that has run this
+  code so far has had AVX-512. Treat it as compiled-but-unproven, and treat any
+  claim about its performance as unmeasured. The `hardware` CI job prints
+  whether a given runner could have run it.
 * **No `exp`/`log`/`sin`/`cos`.** These need integer↔float lane conversions and
   a round-to-nearest in the backend protocol, plus range reduction. Doing them
   badly is worse than not doing them; they are a deliberate omission, not an
@@ -339,8 +353,10 @@ tools/cpuinfo.cpp        what this binary will use, and what the CPU can run
 
 ## Next steps, in the order they would pay off
 
-1. Get CI green on an AVX-512 runner. Nothing below matters until the widest
-   backend has actually executed somewhere.
+1. Execute the AVX-512 backend somewhere. GitHub-hosted runners cannot do it,
+   so this needs a self-hosted runner or a cloud instance on Sapphire Rapids,
+   Ice Lake or Zen 4/5. Nothing below matters until the widest backend has run
+   at least once.
 2. Add `int8`/`int16` lanes with `vpermb`/`vpshufb` — the crypto and compression
    workloads in the original brief need them, and byte permutes are where
    AVX-512's advantage over AVX2 is largest.
