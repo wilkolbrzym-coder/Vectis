@@ -67,23 +67,29 @@ concept FieldOf = requires(const Owner& c, Owner& m, typename D::type v) {
 // Layout: an ordered list of fields over one struct
 // ===========================================================================
 
-/// An ordered list of members of one struct, forming a SoA layout:
+/// An ordered list of field descriptors over one struct.
 ///
-///     using L = layout<Particle, &Particle::x, &Particle::y, &Particle::z>;
-template <class Owner, auto... Members>
+/// Keyed on descriptor *types* rather than on pointers-to-member, because that
+/// is the interface both producers can satisfy: a hand-written descriptor
+/// (`field_of<&Particle::x>`) and one generated from a reflection
+/// (`reflected_field<^^Particle::x>`) are both types, and the container cannot
+/// tell them apart.  `mem_layout` below is the pointer-to-member spelling.
+///
+///     using L = layout<Particle, field_of<&Particle::x>, field_of<&Particle::y>>;
+template <class Owner, class... Fields>
 struct layout {
     using owner_type = Owner;
-    using fields     = std::tuple<field_of<Members>...>;
+    using fields     = std::tuple<Fields...>;
 
-    static constexpr std::size_t count() noexcept { return sizeof...(Members); }
+    static constexpr std::size_t count() noexcept { return sizeof...(Fields); }
 
     static_assert(count() > 0, "a layout needs at least one field");
-    static_assert((FieldOf<field_of<Members>, Owner> && ...),
-                  "every member in a layout must be a vectorisable data member "
+    static_assert((FieldOf<Fields, Owner> && ...),
+                  "every field in a layout must be a vectorisable data member "
                   "of the same struct; nested structs are not lanes");
 
     /// The tuple of per-field arrays this layout implies.
-    using storage_type = std::tuple<std::vector<typename field_of<Members>::type>...>;
+    using storage_type = std::tuple<std::vector<typename Fields::type>...>;
 
     template <std::size_t I>
     using field_at = std::tuple_element_t<I, fields>;
@@ -95,7 +101,7 @@ struct layout {
     /// be ambiguous.
     template <class F>
     static constexpr std::size_t index_of() noexcept {
-        constexpr bool matches[] = {std::is_same_v<F, field_of<Members>>...};
+        constexpr bool matches[] = {std::is_same_v<F, Fields>...};
         for (std::size_t i = 0; i < count(); ++i) {
             if (matches[i]) return i;
         }
@@ -107,9 +113,19 @@ struct layout {
     ///     Layout::for_each_field([&]<class F>() { ... });
     template <class Fn>
     static constexpr void for_each_field(Fn&& fn) {
-        (fn.template operator()<field_of<Members>>(), ...);
+        (fn.template operator()<Fields>(), ...);
     }
 };
+
+/// The same layout, spelled with pointers to members:
+///
+///     using L = mem_layout<Particle, &Particle::x, &Particle::y>;
+///
+/// Pure sugar: it names the descriptor types `field_of` would have produced.
+/// Kept because it is the shortest thing to write by hand, and because it is
+/// the only spelling available before C++26 reflection.
+template <class Owner, auto... Members>
+using mem_layout = layout<Owner, field_of<Members>...>;
 
 // ===========================================================================
 // SoA container

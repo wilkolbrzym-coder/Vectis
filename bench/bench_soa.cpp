@@ -39,7 +39,7 @@ using F_vy   = field_of<&Particle::vy>;
 using F_vz   = field_of<&Particle::vz>;
 using F_life = field_of<&Particle::life>;
 
-using Layout = layout<Particle, &Particle::x, &Particle::y, &Particle::z,
+using Layout = mem_layout<Particle, &Particle::x, &Particle::y, &Particle::z,
                       &Particle::vx, &Particle::vy, &Particle::vz,
                       &Particle::life>;
 

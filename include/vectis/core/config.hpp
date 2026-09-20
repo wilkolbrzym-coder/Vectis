@@ -186,6 +186,21 @@
 #  define VECTIS_MULTIVERSION_FULL
 #endif
 
+// ---------------------------------------------------------------- reflection
+// P2996 static reflection.
+//
+// GCC 16 implements the core behind -freflection, and defines
+// __cpp_impl_reflection (202506) when the flag is on.  Without the flag the
+// macro is simply absent, so the feature is detectable from a header with no
+// build-system cooperation - which is what makes it safe to gate on.
+//
+// Note that __cpp_lib_meta is NOT defined even when reflection works: the
+// library feature-test macro tracks the <meta> header being complete, and it is
+// not.  The compiler macro is the one that means "the syntax is available".
+#if defined(__cpp_impl_reflection) && __cpp_impl_reflection >= 202506
+#  define VECTIS_HAS_REFLECTION 1
+#endif
+
 // ------------------------------------------------------------------ sanity ---
 #if VECTIS_ISA_LEVEL > 0 && !defined(VECTIS_ARCH_X86)
 #  error "Vectis: non-zero ISA level requested on a non-x86 target"

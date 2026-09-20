@@ -8,6 +8,7 @@ add_executable(vectis_tests
     test_simd_avx2.cpp
     test_simd_avx512.cpp
     test_soa.cpp
+    test_soa_reflect.cpp
     test_asm_parity.cpp)
 
 # The AVX-512 battery gets its own translation unit with AVX-512 enabled, so one

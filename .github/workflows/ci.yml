@@ -149,6 +149,7 @@ jobs:
           - { cxx: g++-13,     ver: "13", kind: gcc }
           - { cxx: g++-14,     ver: "14", kind: gcc }
           - { cxx: g++-15,     ver: "15", kind: gcc }
+          - { cxx: g++-16,     ver: "16", kind: gcc }
           - { cxx: clang++-18, ver: "18", kind: clang }
           - { cxx: clang++-19, ver: "19", kind: clang }
           - { cxx: clang++-20, ver: "20", kind: clang }
@@ -161,10 +162,13 @@ jobs:
           sudo apt-get install -y -qq ninja-build cmake
           if [ "${{ matrix.kind }}" = clang ]; then
             wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- ${{ matrix.ver }}
-          elif [ "${{ matrix.ver }}" = "15" ]; then
+          elif [ "${{ matrix.ver }}" = "15" ] || [ "${{ matrix.ver }}" = "16" ]; then
+            # GCC 15 and 16 come from the toolchain PPA; the runner image has
+            # neither.  -y --allow-downgrades because the PPA sometimes carries
+            # an older gcc-N than the one already installed.
             sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
             sudo apt-get update -qq
-            sudo apt-get install -y -qq g++-15
+            sudo apt-get install -y -qq --allow-downgrades g++-${{ matrix.ver }}
           else
             sudo apt-get install -y -qq ${{ matrix.cxx }}
           fi
@@ -183,6 +187,88 @@ jobs:
 
       - name: Test
         run: ctest --test-dir build --output-on-failure
+
+  # ---------------------------------------------------------------------------
+  # Reflection (P2996).
+  #
+  # Defends against: the reflection path rotting because it needs an
+  # experimental compiler flag nobody passes by default.  Without this job the
+  # feature would be exercised only by whoever happened to build with GCC 16.
+  #
+  # GCC 16 is a trunk snapshot in Ubuntu's PPA and may not exist on a given
+  # runner image; the job reports that rather than failing, because "the
+  # compiler is not available" is not a defect in this repository.  What it must
+  # not do is pass silently when the compiler IS available and reflection broke.
+  # ---------------------------------------------------------------------------
+  reflection:
+    name: reflection (P2996)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install GCC 16
+        id: gcc16
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ninja-build cmake
+          sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test || true
+          sudo apt-get update -qq
+          if sudo apt-get install -y -qq --allow-downgrades g++-16; then
+            echo "available=yes" >> $GITHUB_OUTPUT
+          else
+            echo "available=no" >> $GITHUB_OUTPUT
+            echo "::warning::g++-16 is not available from this runner's repositories"
+          fi
+
+      - name: Confirm the compiler really implements reflection
+        if: steps.gcc16.outputs.available == 'yes'
+        run: |
+          # The flag being accepted and the feature working are different
+          # claims.  This is the same probe the build system uses.
+          cat > /tmp/probe.cpp <<'EOF'
+          #include <meta>
+          struct Probe { float x; int n; };
+          consteval std::size_t lanes() {
+              return std::meta::nonstatic_data_members_of(
+                  ^^Probe, std::meta::access_context::current()).size();
+          }
+          static_assert(lanes() == 2);
+          int main() { return 0; }
+          EOF
+          if ! g++-16 -std=c++26 -freflection -fsyntax-only /tmp/probe.cpp; then
+            echo "::error::g++-16 accepted -freflection but reflection does not work"
+            exit 1
+          fi
+          echo "g++-16 implements P2996 core reflection"
+
+      - name: Configure
+        if: steps.gcc16.outputs.available == 'yes'
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_COMPILER=g++-16 \
+            -DVECTIS_ISA_TIER=auto \
+            -DVECTIS_WERROR=ON
+
+      - name: Fail if reflection silently did not get enabled
+        if: steps.gcc16.outputs.available == 'yes'
+        run: |
+          cmake -S . -B build -G Ninja -LA 2>/dev/null | grep -q . || true
+          if ! grep -q "VECTIS_HAS_REFLECTION:INTERNAL=1" build/CMakeCache.txt; then
+            echo "::error::GCC 16 is present but the build did not enable reflection"
+            grep -i reflection build/CMakeCache.txt || true
+            exit 1
+          fi
+          echo "reflection is enabled in this build"
+
+      - name: Build and test
+        if: steps.gcc16.outputs.available == 'yes'
+        run: |
+          cmake --build build --parallel
+          # The reflection tests must actually run, not skip: a suite that
+          # passes because the feature was absent is not a gate.
+          ./build/tests/vectis_tests --filter reflect
+          ctest --test-dir build --output-on-failure
 
   # ---------------------------------------------------------------------------
   # The language floor.
@@ -466,6 +552,7 @@ jobs:
       - hardware
       - tiers
       - compilers
+      - reflection
       - standards
       - optimization
       - headers

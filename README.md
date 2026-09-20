@@ -32,20 +32,34 @@ math::rsqrt(a * b + a).store(out_ptr);
 ```
 
 ```cpp
-#include <vectis/soa/soa.hpp>
+#include <vectis/soa/reflect.hpp>          // C++26 reflection; needs GCC 16 -freflection
 
 struct Particle { float x, y, z, vx, vy, vz; };
 
-using F_x = field_of<&Particle::x>;     // no macro, no code generator
-using L   = layout<Particle, &Particle::x, &Particle::y, &Particle::z,
-                            &Particle::vx, &Particle::vy, &Particle::vz>;
+using L = vectis::reflected_layout<Particle>;   // the struct describes itself
+using F_x = L::field_at<0>;
 
-soa_array<L> particles(aos_ptr, count);          // AoS -> SoA
+vectis::soa_array<L> particles(aos_ptr, count); // AoS -> SoA
 
-particles.for_each_block<16>([&](std::size_t i) { // vectorised kernel over it
+particles.for_each_block<16>([&](std::size_t i) {   // vectorised kernel over it
     particles.store<F_x, 16>(i, particles.load<F_x, 16>(i) +
                                  particles.load<F_vx, 16>(i) * dt);
 });
+```
+
+There is no field list, no annotation, no macro and no code generator anywhere in
+that. Reflection reads the struct, filters out members that cannot be lanes, and
+the container sees an ordinary layout - so every kernel, test and benchmark
+written against the hand-written path works unchanged. `Mixed { float a; int n;
+char tag; double d; bool flag; long counter; }` yields exactly `a, n, d,
+counter`: `char` is a byte and `bool` is a predicate, so both are skipped and the
+order of the rest is preserved.
+
+Without reflection (`soa/soa.hpp`) the same thing is spelled with one
+pointer-to-member per field, which is what C++20 toolchains get:
+
+```cpp
+using L = vectis::mem_layout<Particle, &Particle::x, &Particle::y, ...>;
 ```
 
 ---
@@ -57,9 +71,10 @@ particles.for_each_block<16>([&](std::size_t i) { // vectorised kernel over it
 | Scalar / AVX2 / AVX-512 backends for `f32`, `f64`, `i32`, `u32`, `i64`, `u64` | working |
 | Multi-register vectors, partial-register tails, padded lanes | working, canary-tested |
 | `std::simd`-shaped API: masks, `select`, `all/any/none/bits` | working |
+| AoS → SoA with **real reflection** (GCC 16, `-freflection`) | working — no field list, no annotations |
 | AoS → SoA without reflection, via pointer-to-member NTTPs | working |
 | Assembly layer (GAS `.S`, AVX2): `dot`, `saxpy`, `sum` | working, bit-parity tested |
-| Tests | 23 tests, ~71 000 assertions, green |
+| Tests | 25 tests, ~78 000 assertions, green on GCC 15 and 16 |
 | AVX-512 **execution** | **not verified here** — see below |
 
 ### The hardware this was built on
@@ -88,26 +103,35 @@ comparisons should be read as ratios, not as benchmarks of your hardware.
 
 ## The C++26 question, answered honestly
 
-The project brief asks for `std::experimental::simd`, C++26 reflection, and
-concepts. Here is what was actually available, checked rather than assumed:
+The brief asked for `std::experimental::simd`, C++26 reflection, and concepts.
+What is actually available changed while this was being built, so here is the
+state of each, measured rather than assumed:
 
-| Feature | Status on GCC 15.2 | Consequence |
-|---|---|---|
-| `std::simd` (P1928, C++26) | **absent** — no `<simd>`, no `__cpp_lib_simd` | Vectis ships its own vector type |
-| `<experimental/simd>` (TS) | **absent** from this libstdc++ | — |
-| Reflection (P2996) | **absent** — no `__cpp_lib_meta`, no `__cpp_impl_reflection` | AoS→SoA uses pointer-to-member NTTPs instead |
-| Concepts (C++20) | available | used pervasively, and load-bearing |
-| `-std=c++26` | accepted, reports `__cplusplus = 202400` | so "C++26" here means "the C++2c working draft", not the published standard |
+| Feature | GCC 15.2 | GCC 16 | Consequence |
+|---|---|---|---|
+| Reflection (P2996 core) | absent | **works**, behind `-freflection` | AoS→SoA needs no field list at all |
+| `__cpp_impl_reflection` | undefined | `202506` when the flag is on | the header detects the feature by itself |
+| `std::simd` (P1928, C++26) | absent | `<simd>` exists but `__glibcxx_simd` is off, so it compiles to nothing | Vectis ships its own vector type |
+| `<experimental/simd>` (TS) | absent | **works** — `native_simd<float>` gives 8 lanes on AVX2 | usable as an independent cross-check |
+| Concepts (C++20) | works | works | used pervasively, and load-bearing |
+| `-std=c++26` | `__cplusplus = 202400` | `__cplusplus = 202400` | "C++26" here means the C++2c draft, not the published standard |
 
-Vectis therefore does **not** depend on `std::simd` or reflection. It does not
-merely degrade without them; it does not need them. The vector type is built
-directly on intrinsics, which is also why it can do things a `std::simd` wrapper
-could not — the mask representation, the capability concepts, and the
-partial-register model are all design decisions this library gets to make.
+So reflection is real and Vectis uses it; `std::simd` is still not usable in
+either compiler, which is why the vector type is built directly on intrinsics.
+That turned out to be the better position anyway: the mask representation, the
+capability concepts and the partial-register model are design decisions a
+`std::simd` wrapper would not have been able to make.
 
-Both are written so that the better facility slots in when it arrives: a
-`std::simd` backend is one more ABI tag, and reflection replaces `field_of`
-without the container noticing.
+**The language floor stays C++20.** Reflection is a feature the library
+*discovers*, not one it requires: `soa/reflect.hpp` compiles to nothing without
+`-freflection`, the same layout written with pointers-to-member is the C++20
+answer to the identical question, and both are tested. That is why the CI matrix
+still runs C++20, 23 and 26 — a library that needs the newest compiler to build
+at all is a library most people cannot use.
+
+Enabling it is deliberately not something a consumer has to arrange: the header
+keys off `__cpp_impl_reflection`, which appears only when the flag is on. Add
+`-freflection` and the reflection path lights up; do not, and nothing breaks.
 
 ---
 
@@ -337,6 +361,10 @@ tools/cpuinfo.cpp        what this binary will use, and what the CPU can run
   code so far has had AVX-512. Treat it as compiled-but-unproven, and treat any
   claim about its performance as unmeasured. The `hardware` CI job prints
   whether a given runner could have run it.
+* **Reflection needs `-freflection`, which is GCC-only today.** Clang has no
+  P2996 implementation in any released version, so the reflection path is
+  exercised on exactly one compiler. The pointer-to-member path is what
+  everything else uses, and it is the one the CI matrix covers broadly.
 * **No `exp`/`log`/`sin`/`cos`.** These need integer↔float lane conversions and
   a round-to-nearest in the backend protocol, plus range reduction. Doing them
   badly is worse than not doing them; they are a deliberate omission, not an
@@ -353,6 +381,10 @@ tools/cpuinfo.cpp        what this binary will use, and what the CPU can run
 
 ## Next steps, in the order they would pay off
 
+0. Use `<experimental/simd>` as an independent oracle. It works on GCC 16, it is
+   a separately written implementation of the same operations, and comparing
+   against it would be a second opinion on every kernel - stronger than the
+   scalar oracle, which is ours and shares our assumptions.
 1. Execute the AVX-512 backend somewhere. GitHub-hosted runners cannot do it,
    so this needs a self-hosted runner or a cloud instance on Sapphire Rapids,
    Ice Lake or Zen 4/5. Nothing below matters until the widest backend has run

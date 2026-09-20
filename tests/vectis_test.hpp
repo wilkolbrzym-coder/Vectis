@@ -92,10 +92,10 @@ inline bool check_eq(const A& a, const B& b, const char* ea, const char* eb,
                      const char* file, int line) {
     ++check_count();
     if (a == b) return true;
-    char ba[64], bb[64];
+    char ba[96], bb[96];
     format_value(ba, sizeof ba, a);
     format_value(bb, sizeof bb, b);
-    char msg[256];
+    char msg[640];
     std::snprintf(msg, sizeof msg, "%s == %s  (got %s vs %s)", ea, eb, ba, bb);
     report_failure(msg, file, line);
     return false;
@@ -107,7 +107,7 @@ inline bool check_near(T a, U b, double eps, const char* ea, const char* eb,
     ++check_count();
     const double d = std::fabs(static_cast<double>(a) - static_cast<double>(b));
     if (d <= eps) return true;
-    char msg[256];
+    char msg[640];
     std::snprintf(msg, sizeof msg, "|%s - %s| <= %g  (diff %.9g)", ea, eb, eps, d);
     report_failure(msg, file, line);
     return false;
@@ -148,10 +148,10 @@ inline bool check_ulp(T a, T b, std::uint64_t max_ulp, const char* ea,
     ++check_count();
     const std::uint64_t d = ulp_distance(a, b);
     if (d <= max_ulp) return true;
-    char ba[64], bb[64];
+    char ba[96], bb[96];
     format_value(ba, sizeof ba, a);
     format_value(bb, sizeof bb, b);
-    char msg[256];
+    char msg[640];
     std::snprintf(msg, sizeof msg,
                   "%s ~= %s within %llu ulp  (got %s vs %s, %llu ulp)",
                   ea, eb, static_cast<unsigned long long>(max_ulp), ba, bb,

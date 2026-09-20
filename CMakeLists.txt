@@ -140,6 +140,9 @@ target_include_directories(vectis INTERFACE
 # C++26 is what this project is *built* at, not what it *requires*: the headers
 # work at C++20, use C++23 features where the compiler offers them, and will use
 # C++26 reflection the day it ships.
+set(VECTIS_CXX_STANDARD "26" CACHE STRING
+    "Language standard for the project's own build: 20, 23 or 26")
+
 target_compile_features(vectis INTERFACE cxx_std_20)
 
 # Arch and warning flags are BUILD_INTERFACE only.  They are how this project
@@ -160,7 +163,41 @@ target_compile_options(vectis INTERFACE
 include(CheckCXXCompilerFlag)
 check_cxx_compiler_flag("-std=c++26" VECTIS_HAS_CXX26)
 if(VECTIS_HAS_CXX26)
-    target_compile_options(vectis INTERFACE $<BUILD_INTERFACE:-std=c++26>)
+    target_compile_options(vectis INTERFACE
+        $<BUILD_INTERFACE:-std=c++${VECTIS_CXX_STANDARD}>)
+endif()
+
+# ---------------------------------------------------------------------------
+# Reflection (P2996)
+#
+# GCC 16 implements the core behind -freflection.  The header detects the flag
+# by itself (__cpp_impl_reflection appears only when it is on), so a consumer
+# never needs to be told about this - the feature is simply present or absent.
+# For our own build we enable it when it genuinely works, which is checked by
+# compiling a real reflection rather than by trusting the flag to be accepted.
+#
+# No --enable-languages style guessing: `g++ -freflection` on a compiler that
+# does not implement it is an unknown-argument error, so a trivial flag check
+# would do; a source check is used anyway because "the flag exists" and "the
+# feature works" are different claims, and this project has already been burned
+# once by assuming the second from the first.
+# ---------------------------------------------------------------------------
+include(CheckCXXSourceCompiles)
+set(CMAKE_REQUIRED_FLAGS "-std=c++${VECTIS_CXX_STANDARD} -freflection")
+check_cxx_source_compiles("
+#include <meta>
+struct Probe { float x; int n; };
+consteval std::size_t lane_count() {
+    return std::meta::nonstatic_data_members_of(
+        ^^Probe, std::meta::access_context::current()).size();
+}
+static_assert(lane_count() == 2);
+int main() { return 0; }
+" VECTIS_HAS_REFLECTION)
+unset(CMAKE_REQUIRED_FLAGS)
+
+if(VECTIS_HAS_REFLECTION)
+    target_compile_options(vectis INTERFACE $<BUILD_INTERFACE:-freflection>)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -241,7 +278,8 @@ message(STATUS "")
 message(STATUS "================= Vectis ${PROJECT_VERSION} =================")
 message(STATUS "  compiler      : ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
 message(STATUS "  host          : ${CMAKE_SYSTEM_PROCESSOR} (x86=${VECTIS_ON_X86})")
-message(STATUS "  C++26         : ${VECTIS_HAS_CXX26}")
+message(STATUS "  C++ standard  : ${VECTIS_CXX_STANDARD} (C++26 supported: ${VECTIS_HAS_CXX26})")
+message(STATUS "  reflection    : ${VECTIS_HAS_REFLECTION} (-freflection, P2996)")
 message(STATUS "  ISA tier      : ${VECTIS_ISA_TIER_RESOLVED}")
 message(STATUS "  ISA ceiling   : ${VECTIS_MAX_ISA_LEVEL} (0=scalar 1=sse42 2=avx2 3=avx512, 99=uncapped)")
 message(STATUS "  arch flags    : ${VECTIS_ARCH_FLAGS}")
