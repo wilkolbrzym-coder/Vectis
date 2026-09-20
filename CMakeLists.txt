@@ -112,6 +112,16 @@ set(VECTIS_WARN_FLAGS
     # ever appears as a template argument, and this warning is what proves it -
     # a header-only library must not force -Wno-... on its consumers.
     -Wignored-attributes)
+
+if(VECTIS_IS_GNU AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 14)
+    # GCC 13's -Wstringop-overflow reports a buffer overflow inside libstdc++'s
+    # own <bits/stl_algobase.h> memcpy for ordinary std::vector copies at -O3.
+    # It is a known false positive in the standard library, not a finding about
+    # this code, and with -Werror it blocks the whole GCC 13 job.  Suppressed
+    # for GCC 13 only, so GCC 14 and 15 still get the check.
+    list(APPEND VECTIS_WARN_FLAGS -Wno-stringop-overflow)
+    message(STATUS "  note: GCC ${CMAKE_CXX_COMPILER_VERSION} gets -Wno-stringop-overflow (libstdc++ false positive)")
+endif()
 if(VECTIS_WERROR)
     list(APPEND VECTIS_WARN_FLAGS -Werror)
 endif()

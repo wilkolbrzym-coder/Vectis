@@ -16,20 +16,27 @@ add_executable(vectis_tests
 # that does not accept these flags the file compiles itself out.
 include(CheckCXXCompilerFlag)
 
-# AVX2 battery: its own translation unit, AVX-512 explicitly off so it is a pure
-# 256-bit unit whatever the library tier is.
-check_cxx_compiler_flag("-mavx2" VECTIS_CC_HAS_AVX2)
-if(VECTIS_CC_HAS_AVX2)
-    set_source_files_properties(test_simd_avx2.cpp PROPERTIES
-        COMPILE_OPTIONS "-mavx2;-mfma;-mno-avx512f;-mno-avx512bw;-mno-avx512dq;-mno-avx512vl")
+# The backend batteries are x86-only, and so are their flags.  On aarch64 these
+# -m options are *unused command-line arguments*, which clang reports as an
+# error under -Werror - so the guard is not tidiness, it is what makes the
+# macOS and ARM jobs build at all.  The sources compile to nothing there
+# anyway; see the VECTIS_USE_AVX2 guards inside them.
+if(VECTIS_ON_X86)
+    check_cxx_compiler_flag("-mavx2" VECTIS_CC_HAS_AVX2)
+    if(VECTIS_CC_HAS_AVX2)
+        set_source_files_properties(test_simd_avx2.cpp PROPERTIES
+            COMPILE_OPTIONS "-mavx2;-mfma;-mno-avx512f;-mno-avx512bw;-mno-avx512dq;-mno-avx512vl")
+    endif()
 endif()
 
-check_cxx_compiler_flag("-mavx512f" VECTIS_CC_HAS_AVX512)
-if(VECTIS_CC_HAS_AVX512)
-    set_source_files_properties(test_simd_avx512.cpp PROPERTIES
-        COMPILE_OPTIONS "-mavx512f;-mavx512bw;-mavx512dq;-mavx512vl")
-else()
-    message(STATUS "tests: compiler has no AVX-512 support, that battery is out")
+if(VECTIS_ON_X86)
+    check_cxx_compiler_flag("-mavx512f" VECTIS_CC_HAS_AVX512)
+    if(VECTIS_CC_HAS_AVX512)
+        set_source_files_properties(test_simd_avx512.cpp PROPERTIES
+            COMPILE_OPTIONS "-mavx512f;-mavx512bw;-mavx512dq;-mavx512vl")
+    else()
+        message(STATUS "tests: compiler has no AVX-512 support, that battery is out")
+    endif()
 endif()
 
 target_link_libraries(vectis_tests PRIVATE vectis::vectis)

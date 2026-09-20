@@ -188,9 +188,19 @@ inline float sum_f32_scalar_4acc(const float* a, std::size_t n) noexcept {
     return (t0 + t1) + (t2 + t3);
 }
 
+/// The scalar reference, explicitly fused.
+///
+/// `y[i] += alpha * x[i]` would be the obvious spelling, but whether the
+/// compiler contracts that into one rounding is implementation-defined and
+/// depends on the optimisation level.  That ambiguity made the parity test fail
+/// at -O0 and pass at -O2, for reasons that had nothing to do with either
+/// kernel - and when y cancels alpha*x the intermediate rounding error is
+/// amplified, so no fixed ulp budget is stable.  Naming std::fma removes the
+/// question, and makes the comparison exact: a correctly rounded fma is a
+/// correctly rounded fma on every tier.
 inline void saxpy_f32_scalar(float* y, const float* x, float alpha,
                              std::size_t n) noexcept {
-    for (std::size_t i = 0; i < n; ++i) y[i] += alpha * x[i];
+    for (std::size_t i = 0; i < n; ++i) y[i] = std::fma(alpha, x[i], y[i]);
 }
 
 inline float sum_f32_scalar(const float* a, std::size_t n) noexcept {

@@ -21,8 +21,15 @@
 // ===========================================================================
 #include "bench_harness.hpp"
 
+#include <vectis/core/config.hpp>
 #include <vectis/core/cpu.hpp>
-#include <vectis/kernels/asm_kernels.hpp>
+
+// The assembly kernels and their intrinsics twins are x86-only; on anything
+// else this benchmark has nothing to compare and says so.
+#if defined(VECTIS_ARCH_X86)
+#  include <vectis/kernels/asm_kernels.hpp>
+#  define VECTIS_BENCH_ASM 1
+#endif
 
 #include <cstdio>
 #include <cstring>
@@ -52,6 +59,16 @@ std::size_t parse_size(int argc, char** argv) {
 }
 
 } // namespace
+
+#if !defined(VECTIS_BENCH_ASM)
+
+int main() {
+    std::printf("\nvectis benchmark: asm vs intrinsics vs scalar\n");
+    std::printf("  SKIP: the assembly layer and its intrinsics twins are x86-only.\n");
+    return 0;
+}
+
+#else
 
 int main(int argc, char** argv) {
     std::printf("\nvectis benchmark: asm vs intrinsics vs scalar\n");
@@ -134,3 +151,5 @@ int main(int argc, char** argv) {
     vbench::total_sink();
     return 0;
 }
+
+#endif // VECTIS_BENCH_ASM

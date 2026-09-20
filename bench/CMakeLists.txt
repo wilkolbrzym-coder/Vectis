@@ -9,6 +9,9 @@
 add_library(vectis_bench_harness INTERFACE)
 target_include_directories(vectis_bench_harness INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
 
+# bench_asm compares the assembly layer against intrinsics, which only exists
+# on x86.  The source guards itself and prints a skip message elsewhere, so it
+# is built everywhere the language allows - but nothing else may depend on it.
 add_executable(bench_asm bench_asm.cpp)
 target_link_libraries(bench_asm PRIVATE vectis::vectis vectis_bench_harness)
 

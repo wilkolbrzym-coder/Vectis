@@ -83,7 +83,11 @@ VECTIS_TEST(asm_dot_matches_intrinsics_exactly) {
             vtest::report_failure(msg, __FILE__, __LINE__);
         }
         // The scalar reference sums in one chain, so it is only close.
-        CHECK_NEAR(from_asm, from_sca, 1e-2f * (1.0f + std::fabs(from_sca)));
+        // Written as a double throughout: clang resolves std::fabs on a float to
+        // the C fabs(double) overload and then reports the widening, which with
+        // -Wdouble-promotion and -Werror fails the build.
+        const double scale = 1.0 + std::fabs(static_cast<double>(from_sca));
+        CHECK_NEAR(from_asm, from_sca, 1e-2 * scale);
     }
 }
 
@@ -121,9 +125,13 @@ VECTIS_TEST(asm_saxpy_matches_intrinsics_exactly) {
                 vtest::report_failure(msg, __FILE__, __LINE__);
                 break;
             }
-            // fma in both, so this is exact against the plain-C reference too
-            // only if the compiler also contracts; allow one ulp.
-            CHECK_ULP(y_asm[i], y_sca[i], 1);
+            // Exact, because all three implementations now fuse explicitly:
+            // the asm tail ends in vfmadd231ss, the intrinsics twin uses
+            // std::fma, and so does the scalar reference.  A correctly rounded
+            // fused multiply-add is the same value everywhere, so there is no
+            // tolerance to choose here - and choosing one is how the previous
+            // version of this test came to fail at -O0 and pass at -O2.
+            CHECK_ULP(y_asm[i], y_sca[i], 0);
         }
 
         // Nothing past n may be touched: the tail loop is the easy place to
@@ -169,7 +177,8 @@ VECTIS_TEST(asm_sum_matches_intrinsics_exactly) {
                           static_cast<unsigned long long>(d));
             vtest::report_failure(msg, __FILE__, __LINE__);
         }
-        CHECK_NEAR(from_asm, from_sca, 1e-2f * (1.0f + std::fabs(from_sca)));
+        const double scale = 1.0 + std::fabs(static_cast<double>(from_sca));
+        CHECK_NEAR(from_asm, from_sca, 1e-2 * scale);
     }
 }
 

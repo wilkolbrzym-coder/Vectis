@@ -65,78 +65,139 @@ struct features {
     isa_level best = isa_level::scalar;
 };
 
-#if defined(VECTIS_ARCH_X86) && \
-   (defined(VECTIS_COMPILER_GCC) || defined(VECTIS_COMPILER_CLANG))
-#  define VECTIS_HAS_CPU_PROBE 1
-#endif
-
 namespace detail {
 
 #if defined(VECTIS_ARCH_X86)
+
+/// Raw CPUID.  `sub` is the sub-leaf, which only leaf 7 and the extended
+/// topology leaves care about.
 inline void cpuid(std::uint32_t leaf, std::uint32_t sub,
-                  std::uint32_t& a, std::uint32_t& b,
-                  std::uint32_t& c, std::uint32_t& d) noexcept {
+                                std::uint32_t& a, std::uint32_t& b,
+                                std::uint32_t& c, std::uint32_t& d) noexcept {
     __asm__ __volatile__("cpuid"
                          : "=a"(a), "=b"(b), "=c"(c), "=d"(d)
                          : "a"(leaf), "c"(sub));
 }
-#endif
 
-#ifdef VECTIS_HAS_CPU_PROBE
-// __builtin_cpu_supports takes a string *literal*, so the name cannot be
-// funnelled through a variable.  The macro keeps the literal at the call site.
-#  define VECTIS_CPU_SUP(name) (__builtin_cpu_supports(name) != 0)
+/// Read an extended control register.  Only legal when CPUID.1:ECX.OSXSAVE is
+/// set; on a CPU without XSAVE this instruction raises #UD.
+[[nodiscard]] inline std::uint64_t xgetbv0() noexcept {
+    std::uint32_t lo = 0, hi = 0;
+    __asm__ __volatile__("xgetbv" : "=a"(lo), "=d"(hi) : "c"(0));
+    return (static_cast<std::uint64_t>(hi) << 32) | lo;
+}
+
+[[nodiscard]] inline bool bit(std::uint32_t word, int n) noexcept {
+    return ((word >> n) & 1u) != 0;
+}
+
+#endif // VECTIS_ARCH_X86
+
+/// Read the CPU's feature set.
+///
+/// Deliberately built on CPUID directly rather than __builtin_cpu_supports.
+/// Two reasons, both found the hard way by CI:
+///
+///   1. The set of feature *strings* a compiler accepts is not standardised.
+///      Clang rejects "movbe", "adx", "sha" and "vaes", which GCC accepts, so
+///      the builtin makes the header uncompilable on half the toolchains we
+///      claim to support.  CPUID bit positions are architecture, not compiler
+///      opinion, and they do not drift.
+///   2. The builtin hides the OS-support check.  AVX and AVX-512 need XCR0 to
+///      say the kernel saves the wider register state: without that, the first
+///      AVX-512 instruction faults or - worse - silently corrupts its
+///      neighbour's registers across a context switch.  A SIMD library should
+///      be able to point at the check it relies on.
+[[nodiscard]] inline features detect() noexcept {
+    features r{};
+
+#if defined(VECTIS_ARCH_X86)
+    std::uint32_t a = 0, b = 0, c = 0, d = 0;
+
+    cpuid(0, 0, a, b, c, d);
+    const std::uint32_t max_leaf = a;
+    if (max_leaf < 1) return r;
+
+    // ---- leaf 1: the 1990s-and-2000s set, plus the AVX OS-support bits
+    cpuid(1, 0, a, b, c, d);
+    r.sse42  = bit(c, 20);
+    r.popcnt = bit(c, 23);
+    r.movbe  = bit(c, 22);
+    r.aes    = bit(c, 25);
+    r.pclmul = bit(c, 1);
+    r.f16c   = bit(c, 29);
+    r.fma    = bit(c, 12);
+
+    const bool has_xsave   = bit(c, 26);
+    const bool has_osxsave = bit(c, 27);
+    const bool avx_in_hw   = bit(c, 28);
+
+    // xgetbv is only legal once the OS has enabled XSAVE.
+    const std::uint64_t xcr0 = (has_xsave && has_osxsave) ? xgetbv0() : 0;
+    // bits 1,2  = XMM and YMM state saved
+    const bool ymm_ok = (xcr0 & 0x6ull) == 0x6ull;
+    // bits 5,6,7 = opmask, ZMM_Hi256, Hi16_ZMM - all three, or AVX-512 is not
+    // safe to use even when the CPU reports the instructions.
+    const bool zmm_ok = (xcr0 & 0xE6ull) == 0xE6ull;
+
+    r.avx = avx_in_hw && ymm_ok;
+
+    if (max_leaf < 7) {
+        if (r.avx2 && r.fma) r.best = isa_level::avx2;
+        else if (r.sse42)    r.best = isa_level::sse42;
+        return r;
+    }
+
+    // ---- leaf 7 sub-leaf 0: BMI, AVX2, and the AVX-512 family
+    cpuid(7, 0, a, b, c, d);
+    const std::uint32_t max_sub = a;
+
+    r.bmi1 = bit(b, 3);
+    r.bmi2 = bit(b, 8);
+    r.adx  = bit(b, 19);
+    r.sha  = bit(b, 29);
+    r.avx2 = bit(b, 5) && r.avx;
+
+    r.avx512f    = bit(b, 16) && zmm_ok;
+    r.avx512dq   = bit(b, 17);
+    r.avx512ifma = bit(b, 21);
+    r.avx512cd   = bit(b, 28);
+    r.avx512bw   = bit(b, 30);
+    r.avx512vl   = bit(b, 31);
+
+    r.avx512vbmi      = bit(c, 1);
+    r.avx512vbmi2     = bit(c, 6);
+    r.gfni            = bit(c, 8);
+    r.vaes            = bit(c, 9);
+    r.vpclmul         = bit(c, 10);
+    r.avx512vnni      = bit(c, 11);
+    r.avx512bitalg    = bit(c, 12);
+    r.avx512vpopcntdq = bit(c, 14);
+
+    r.avx512fp16 = bit(d, 23);
+
+    // ---- leaf 7 sub-leaf 1: AVX512_BF16
+    if (max_sub >= 1) {
+        cpuid(7, 1, a, b, c, d);
+        r.avx512bf16 = bit(a, 5);
+    }
+
+    // The 512-bit tier requires the whole quartet, not F alone: byte-granular
+    // blends and efficient 32-bit lane compares come from BW and VL, and every
+    // kernel in this library assumes they are there.
+    if (r.avx512f && r.avx512bw && r.avx512dq && r.avx512vl) {
+        r.best = isa_level::avx512;
+    } else if (r.avx2 && r.fma) {
+        r.best = isa_level::avx2;
+    } else if (r.sse42) {
+        r.best = isa_level::sse42;
+    }
 #endif
+    return r;
+}
 
 inline const features& query() noexcept {
-    static const features f = [] {
-        features r{};
-#ifdef VECTIS_HAS_CPU_PROBE
-        // The runtime built this table before any constructor ran; force it to
-        // materialise even when we are called from an early initialiser.
-        __builtin_cpu_init();
-
-        r.sse42   = VECTIS_CPU_SUP("sse4.2");
-        r.popcnt  = VECTIS_CPU_SUP("popcnt");
-        r.avx     = VECTIS_CPU_SUP("avx");
-        r.avx2    = VECTIS_CPU_SUP("avx2");
-        r.fma     = VECTIS_CPU_SUP("fma");
-        r.f16c    = VECTIS_CPU_SUP("f16c");
-        r.bmi1    = VECTIS_CPU_SUP("bmi");
-        r.bmi2    = VECTIS_CPU_SUP("bmi2");
-        r.movbe   = VECTIS_CPU_SUP("movbe");
-        r.adx     = VECTIS_CPU_SUP("adx");
-        r.aes     = VECTIS_CPU_SUP("aes");
-        r.pclmul  = VECTIS_CPU_SUP("pclmul");
-        r.sha     = VECTIS_CPU_SUP("sha");
-        r.gfni    = VECTIS_CPU_SUP("gfni");
-        r.vaes    = VECTIS_CPU_SUP("vaes");
-        r.vpclmul = VECTIS_CPU_SUP("vpclmulqdq");
-
-        r.avx512f    = VECTIS_CPU_SUP("avx512f");
-        r.avx512cd   = VECTIS_CPU_SUP("avx512cd");
-        r.avx512bw   = VECTIS_CPU_SUP("avx512bw");
-        r.avx512dq   = VECTIS_CPU_SUP("avx512dq");
-        r.avx512vl   = VECTIS_CPU_SUP("avx512vl");
-        r.avx512vbmi = VECTIS_CPU_SUP("avx512vbmi");
-        r.avx512vbmi2     = VECTIS_CPU_SUP("avx512vbmi2");
-        r.avx512vnni      = VECTIS_CPU_SUP("avx512vnni");
-        r.avx512bitalg    = VECTIS_CPU_SUP("avx512bitalg");
-        r.avx512vpopcntdq = VECTIS_CPU_SUP("avx512vpopcntdq");
-        r.avx512ifma      = VECTIS_CPU_SUP("avx512ifma");
-        r.avx512bf16      = VECTIS_CPU_SUP("avx512bf16");
-        r.avx512fp16      = VECTIS_CPU_SUP("avx512fp16");
-
-        if (r.avx512f && r.avx512bw && r.avx512dq && r.avx512vl) {
-            r.best = isa_level::avx512;
-        } else if (r.avx2 && r.fma) {
-            r.best = isa_level::avx2;
-        } else if (r.sse42) {
-            r.best = isa_level::sse42;
-        }
-#endif
-        return r;
-    }();
+    static const features f = detect();
     return f;
 }
 
