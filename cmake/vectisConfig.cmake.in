@@ -1,0 +1,8 @@
+@PACKAGE_INIT@
+
+# Vectis is header-only, so there is nothing to link beyond the interface
+# target and its include directory.  Everything the headers need is in the
+# standard library.
+include("${CMAKE_CURRENT_LIST_DIR}/vectisTargets.cmake")
+
+check_required_components(vectis)

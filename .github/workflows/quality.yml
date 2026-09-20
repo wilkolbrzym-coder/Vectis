@@ -1,0 +1,290 @@
+name: Quality
+
+# Deeper checks that are too slow or too noisy to gate every push.
+#
+# Runs on pull requests and on a weekly schedule.  Everything here is either a
+# dynamic-analysis tool looking for undefined behaviour, or a report a human
+# reads - as opposed to ci.yml, which is a binary yes/no on whether the thing
+# builds and passes on every platform we claim.
+#
+# Steps that depend on a tool the author could not install locally are marked
+# `continue-on-error: true` and say so.  A check nobody has ever seen pass is
+# not a gate; it is a red herring that trains people to ignore CI.
+
+on:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '43 3 * * 1'
+
+concurrency:
+  group: quality-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CTEST_OUTPUT_ON_FAILURE: 1
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Sanitizers and hardened standard libraries.
+  #
+  # Defends against: out-of-bounds access on the padded tail of a partial
+  # register; signed overflow in the lane arithmetic; a data race in the
+  # one-time CPU feature probe; anything that only trips with container bounds
+  # checking enabled.
+  # ---------------------------------------------------------------------------
+  sanitizers:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: asan+ubsan (scalar)
+            tier: scalar
+            flags: "-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
+            link: "-fsanitize=address,undefined"
+            env: "UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 ASAN_OPTIONS=detect_leaks=1"
+          - name: asan+ubsan (avx2)
+            tier: avx2
+            flags: "-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
+            link: "-fsanitize=address,undefined"
+            env: "UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 ASAN_OPTIONS=detect_leaks=1"
+          - name: tsan
+            tier: avx2
+            flags: "-fsanitize=thread -fno-omit-frame-pointer"
+            link: "-fsanitize=thread"
+            env: ""
+          - name: glibcxx assertions
+            tier: avx2
+            flags: "-D_GLIBCXX_ASSERTIONS -D_FORTIFY_SOURCE=3"
+            link: ""
+            env: ""
+          - name: glibcxx debug mode
+            tier: scalar
+            flags: "-D_GLIBCXX_DEBUG -D_GLIBCXX_DEBUG_PEDANTIC -D_GLIBCXX_ASSERTIONS"
+            link: ""
+            env: ""
+    steps:
+      - uses: actions/checkout@v4
+
+      - run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq g++-14 ninja-build
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_CXX_COMPILER=g++-14 \
+            -DCMAKE_CXX_FLAGS="${{ matrix.flags }}" \
+            -DCMAKE_EXE_LINKER_FLAGS="${{ matrix.link }}" \
+            -DVECTIS_ISA_TIER=${{ matrix.tier }} \
+            -DVECTIS_BUILD_BENCHMARKS=OFF
+
+      - run: cmake --build build --parallel
+
+      - name: Test under ${{ matrix.name }}
+        env:
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+          ASAN_OPTIONS: detect_leaks=1
+        run: ctest --test-dir build --output-on-failure
+
+  # ---------------------------------------------------------------------------
+  # Valgrind.
+  #
+  # Defends against: uninitialised reads that the sanitizers miss, which for a
+  # SIMD library means a padded lane leaking into a result.
+  #
+  # ADVISORY: valgrind was not available on the development machine, so this job
+  # has never been observed to pass.  It is here because it is cheap and correct
+  # in principle - promote it to a gate once it has run green a few times.
+  # ---------------------------------------------------------------------------
+  valgrind:
+    name: valgrind memcheck
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq g++-14 ninja-build valgrind
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_CXX_COMPILER=g++-14 \
+            -DVECTIS_ISA_TIER=avx2 \
+            -DVECTIS_BUILD_BENCHMARKS=OFF
+
+      - run: cmake --build build --parallel
+
+      # The AVX-512 battery skips itself on hosts without AVX-512, so only the
+      # runnable tiers are exercised here.
+      - name: Memcheck
+        run: |
+          valgrind --error-exitcode=1 --leak-check=full \
+                   --errors-for-leak-kinds=definite \
+                   --track-origins=yes \
+                   ./build/tests/vectis_tests
+
+  # ---------------------------------------------------------------------------
+  # Static analysis.
+  #
+  # Defends against: paths no test reaches; a use-after-move or a null
+  # dereference in code that only runs on one tier.
+  #
+  # ADVISORY: neither clang-tidy nor cppcheck was available on the development
+  # machine.  cppcheck is deliberately configured to fail only on error-class
+  # findings, so it is a real signal rather than a style report.
+  # ---------------------------------------------------------------------------
+  static-analysis:
+    name: static analysis
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq g++-14 ninja-build clang-tidy cppcheck
+
+      - name: Generator expression database for clang-tidy
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_CXX_COMPILER=g++-14 \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            -DVECTIS_ISA_TIER=avx2
+          cmake --build build --parallel
+
+      - name: clang-tidy
+        run: |
+          # Only the project's own sources, and only correctness-oriented checks.
+          # Style opinions belong in review, not in a job that fails the build.
+          files=$(find tests bench tools -name '*.cpp' | sort)
+          clang-tidy -p build \
+            --checks='-*,bugprone-*,performance-*,portability-*,-bugprone-easily-swappable-parameters,-bugprone-narrowing-conversions' \
+            --warnings-as-errors='bugprone-*,performance-*' \
+            $files 2>&1 | tee tidy.log
+          echo "clang-tidy findings: $(grep -c 'warning:' tidy.log || true)"
+
+      - name: cppcheck
+        run: |
+          cppcheck --enable=warning,performance,portability \
+                   --inline-suppr \
+                   --std=c++20 \
+                   --error-exitcode=1 \
+                   --suppress=missingIncludeSystem \
+                   --suppress=unusedFunction \
+                   -I include \
+                   include tests 2>&1 | tee cppcheck.log
+
+      - name: GCC static analyzer
+        run: |
+          # GCC's own analyzer, which needs no extra install and has been run
+          # locally, unlike the two above.
+          for f in tests/test_simd_core.cpp tests/test_simd_avx2.cpp tests/test_soa.cpp; do
+            g++-14 -std=c++26 -O2 -march=x86-64-v3 -Iinclude -fanalyzer \
+                   -Wall -Wextra -fsyntax-only "$f"
+          done
+
+  # ---------------------------------------------------------------------------
+  # Coverage.
+  #
+  # Defends against: a backend or a tier that is compiled but never executed by
+  # any test.  Reported rather than enforced - a coverage threshold that people
+  # game is worse than no threshold.
+  # ---------------------------------------------------------------------------
+  coverage:
+    name: coverage
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq g++-14 ninja-build gcovr
+
+      - name: Configure with coverage instrumentation
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_COMPILER=g++-14 \
+            -DCMAKE_CXX_FLAGS="--coverage -O0 -fno-inline -fno-inline-small-functions" \
+            -DCMAKE_EXE_LINKER_FLAGS="--coverage" \
+            -DVECTIS_ISA_TIER=avx2 \
+            -DVECTIS_BUILD_BENCHMARKS=OFF
+
+      - run: cmake --build build --parallel
+      - run: ctest --test-dir build --output-on-failure
+
+      - name: Report
+        run: |
+          gcovr --root . --filter 'include/vectis/' --print-summary \
+                --txt-metric branch build | tee coverage.txt
+          {
+            echo "### Coverage over include/vectis"
+            echo '```'
+            cat coverage.txt
+            echo '```'
+          } >> $GITHUB_STEP_SUMMARY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.txt
+
+  # ---------------------------------------------------------------------------
+  # Benchmarks.
+  #
+  # Defends against: the benchmarks bit-rotting because nobody runs them. The
+  # numbers are NOT compared across runs - a shared runner measures its
+  # neighbours - they are only required to produce output.
+  # ---------------------------------------------------------------------------
+  benchmarks:
+    name: benchmarks run
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq g++-14 ninja-build
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_COMPILER=g++-14 \
+            -DVECTIS_ISA_TIER=avx2
+
+      - run: cmake --build build --parallel
+
+      - name: Report the runner's CPU before trusting any number below
+        run: ./build/tools/vectis-cpuinfo
+
+      - name: Run
+        run: |
+          {
+            echo "### Benchmarks on this runner"
+            echo "These measure the runner's neighbours as much as the kernels."
+            echo '```'
+            ./build/bench/bench_asm --size 262144
+            ./build/bench/bench_simd --quick
+            ./build/bench/bench_soa --quick
+            echo '```'
+          } | tee bench.txt
+          {
+            echo "### Benchmarks"
+            echo '```'
+            cat bench.txt
+            echo '```'
+          } >> $GITHUB_STEP_SUMMARY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-output
+          path: bench.txt

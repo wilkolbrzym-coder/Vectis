@@ -1,0 +1,477 @@
+name: CI
+
+# Vectis is a SIMD engine, so the interesting bugs live on hardware and
+# compilers the developer does not have.  This workflow exists to put the code
+# in front of all of them.
+#
+# The design rule for everything here: BUILD ALWAYS, RUN WHEN THE HARDWARE
+# ALLOWS.  A tier that cannot execute on a given runner is still compiled,
+# because a compile error is a bug; skipping only the execution is missing
+# silicon, and the job says so out loud rather than passing silently.
+#
+# Each job names what it defends against, because a CI job nobody understands
+# is a CI job somebody eventually deletes.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    # Weekly, to catch compiler and runner-image regressions even when nothing
+    # changed here.  Compilers break things without telling you.
+    - cron: '17 4 * * 1'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CTEST_OUTPUT_ON_FAILURE: 1
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # What hardware did we actually get?  Printed first and kept in the summary,
+  # because every performance number this project publishes is meaningless
+  # without it - and because GitHub occasionally changes runner CPUs.
+  # ---------------------------------------------------------------------------
+  hardware:
+    name: Runner hardware report
+    runs-on: ubuntu-24.04
+    outputs:
+      avx512: ${{ steps.cpu.outputs.avx512 }}
+    steps:
+      - name: Inspect CPU
+        id: cpu
+        run: |
+          if grep -qw avx512f /proc/cpuinfo && grep -qw avx512bw /proc/cpuinfo; then
+            echo "avx512=yes" >> $GITHUB_OUTPUT
+          else
+            echo "avx512=no" >> $GITHUB_OUTPUT
+          fi
+          {
+            echo "### Runner CPU"
+            echo '```'
+            lscpu | grep -Ei 'model name|^cpu\(s\)|thread|core|socket|mhz|cache' || true
+            echo '```'
+            echo "### SIMD features"
+            for f in sse4_2 avx avx2 fma f16c bmi2 aes pclmulqdq sha_ni gfni vaes \
+                     vpclmulqdq avx512f avx512cd avx512bw avx512dq avx512vl \
+                     avx512vbmi avx512vbmi2 avx512vnni avx512bitalg \
+                     avx512vpopcntdq avx512ifma avx512bf16 avx512fp16; do
+              if grep -qw "$f" /proc/cpuinfo; then
+                echo "- \`$f\`: present"
+              else
+                echo "- \`$f\`: absent"
+              fi
+            done
+          } >> $GITHUB_STEP_SUMMARY
+
+  # ---------------------------------------------------------------------------
+  # Every ISA tier the project claims to support.
+  #
+  # Defends against: a tier that only compiles because the others were never
+  # tried; a backend whose intrinsics do not exist at a lower ISA level; the
+  # AVX-512 backend rotting because nobody builds it.
+  # ---------------------------------------------------------------------------
+  tiers:
+    name: tier=${{ matrix.tier }}
+    needs: hardware
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        tier: [scalar, avx2, avx512, auto, native]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq g++-14 ninja-build cmake binutils
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_COMPILER=g++-14 \
+            -DVECTIS_ISA_TIER=${{ matrix.tier }} \
+            -DVECTIS_WERROR=ON
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      # A tier-avx512 binary may execute AVX-512 in main()'s prologue, so it
+      # cannot run at all on a runner without it.  Building is the test there.
+      - name: Test
+        if: matrix.tier != 'avx512' || needs.hardware.outputs.avx512 == 'yes'
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Report skipped execution
+        if: matrix.tier == 'avx512' && needs.hardware.outputs.avx512 != 'yes'
+        run: |
+          echo "::warning::tier avx512 was built but NOT executed: this runner has no AVX-512"
+          {
+            echo "### tier avx512: built, not executed"
+            echo "The runner has no AVX-512, so this tier is verified by compilation only."
+          } >> $GITHUB_STEP_SUMMARY
+
+      - name: Confirm the binary's own view of itself
+        run: ./build/tools/vectis-cpuinfo
+
+  # ---------------------------------------------------------------------------
+  # Every compiler the project claims to support.
+  #
+  # Defends against: a second front end finding UB that GCC accepted; a
+  # diagnostic that is an error on Clang and a warning on GCC.
+  # ---------------------------------------------------------------------------
+  compilers:
+    name: ${{ matrix.cxx }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { cxx: g++-13,     ver: "13", kind: gcc }
+          - { cxx: g++-14,     ver: "14", kind: gcc }
+          - { cxx: g++-15,     ver: "15", kind: gcc }
+          - { cxx: clang++-18, ver: "18", kind: clang }
+          - { cxx: clang++-19, ver: "19", kind: clang }
+          - { cxx: clang++-20, ver: "20", kind: clang }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ${{ matrix.cxx }}
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ninja-build cmake
+          if [ "${{ matrix.kind }}" = clang ]; then
+            wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- ${{ matrix.ver }}
+          elif [ "${{ matrix.ver }}" = "15" ]; then
+            sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq g++-15
+          else
+            sudo apt-get install -y -qq ${{ matrix.cxx }}
+          fi
+          ${{ matrix.cxx }} --version
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_COMPILER=${{ matrix.cxx }} \
+            -DVECTIS_ISA_TIER=auto \
+            -DVECTIS_WERROR=ON
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  # ---------------------------------------------------------------------------
+  # The language floor.
+  #
+  # Defends against: quietly requiring C++26 while claiming C++20.
+  # ---------------------------------------------------------------------------
+  standards:
+    name: c++${{ matrix.std }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        std: ["20", "23", "26"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq g++-14 ninja-build
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_COMPILER=g++-14 \
+            -DCMAKE_CXX_STANDARD=${{ matrix.std }} \
+            -DCMAKE_CXX_STANDARD_REQUIRED=ON \
+            -DCMAKE_CXX_EXTENSIONS=OFF \
+            -DVECTIS_ISA_TIER=auto \
+            -DVECTIS_WERROR=ON
+
+      - run: cmake --build build --parallel
+      - run: ctest --test-dir build --output-on-failure
+
+  # ---------------------------------------------------------------------------
+  # Optimisation levels.
+  #
+  # Defends against: undefined behaviour that only manifests at -O3, and
+  # constexpr code that only works when the optimiser folds it.
+  # ---------------------------------------------------------------------------
+  optimization:
+    name: opt=${{ matrix.opt }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        opt: ["-O0", "-O1", "-O2", "-O3", "-Os", "-Og"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq g++-14 ninja-build
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=None \
+            -DCMAKE_CXX_COMPILER=g++-14 \
+            -DCMAKE_CXX_FLAGS="${{ matrix.opt }}" \
+            -DVECTIS_ISA_TIER=auto \
+            -DVECTIS_WERROR=ON \
+            -DVECTIS_BUILD_BENCHMARKS=OFF
+
+      - run: cmake --build build --parallel
+      - run: ctest --test-dir build --output-on-failure
+
+  # ---------------------------------------------------------------------------
+  # Header self-containment.
+  #
+  # Defends against: a header that only compiles because another header was
+  # included first.  For a header-only library this is the most common way to
+  # break a consumer, and one job is enough to be sure.
+  # ---------------------------------------------------------------------------
+  headers:
+    name: each header stands alone
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq g++-14 clang-18
+
+      - name: Compile every public header on its own
+        run: |
+          fail=0
+          tiers=(
+            "-march=x86-64-v3"
+            "-march=x86-64-v4 -mavx512f -mavx512bw -mavx512dq -mavx512vl"
+            "-mno-avx -mno-avx2 -mno-fma"
+          )
+          headers=$(cd include && find vectis -name '*.hpp' | sort)
+          for h in $headers; do
+            for cxx in g++-14 clang-18; do
+              command -v "$cxx" >/dev/null || continue
+              for std in c++20 c++23 c++26; do
+                for tier in "${tiers[@]}"; do
+                  if ! printf '#include <%s>\nint main(){return 0;}\n' "$h" \
+                       | $cxx -std=$std -O1 $tier -Iinclude \
+                              -Wall -Wextra -Wpedantic -Wcast-align -Wconversion \
+                              -Wshadow -Wdouble-promotion -Wignored-attributes \
+                              -Werror -fsyntax-only -x c++ - 2>err.txt; then
+                    echo "::error::header $h failed: $cxx -std=$std $tier"
+                    cat err.txt
+                    fail=1
+                  fi
+                done
+              done
+            done
+          done
+          if [ $fail -eq 0 ]; then
+            echo "all $(echo "$headers" | wc -l) headers stand alone across 2 compilers, 3 standards and 3 ISA tiers"
+          fi
+          exit $fail
+
+  # ---------------------------------------------------------------------------
+  # A consumer's view.
+  #
+  # Defends against: a package that installs but cannot be found; headers that
+  # only build with Vectis's own warning flags; the library forcing its opinions
+  # on downstream targets.  This job is what caught the -Wignored-attributes
+  # warning escaping into consumer builds.
+  # ---------------------------------------------------------------------------
+  consumer:
+    name: install + find_package ${{ matrix.march }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        march: ["(default)", "-march=x86-64-v3"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq g++-14 ninja-build
+
+      - name: Build and install Vectis
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=g++-14 \
+            -DVECTIS_BUILD_TESTS=OFF -DVECTIS_BUILD_BENCHMARKS=OFF \
+            -DVECTIS_BUILD_TOOLS=OFF
+          cmake --build build --parallel
+          cmake --install build --prefix ${{ runner.temp }}/vectis-prefix
+
+      - name: Build a strict consumer against the installed package
+        run: |
+          mkdir -p ${{ runner.temp }}/consumer && cd ${{ runner.temp }}/consumer
+
+          cat > CMakeLists.txt <<'EOF'
+          cmake_minimum_required(VERSION 3.24)
+          project(vectis_consumer CXX)
+          find_package(vectis 0.1 REQUIRED)
+          add_executable(consumer main.cpp)
+          target_link_libraries(consumer PRIVATE vectis::vectis)
+          # A strict consumer: none of Vectis's own flags, all of its own.
+          target_compile_options(consumer PRIVATE
+              -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+              -Wdouble-promotion -Wignored-attributes -Werror)
+          EOF
+
+          cat > main.cpp <<'EOF'
+          #include <vectis/simd/reduce.hpp>
+          #include <vectis/simd/math.hpp>
+          #include <vectis/soa/soa.hpp>
+          #include <cstdio>
+          using namespace vectis;
+          struct P { float x, y; };
+          using L = layout<P, &P::x, &P::y>;
+          int main() {
+              float a[8]{1,2,3,4,5,6,7,8}, b[8]{8,7,6,5,4,3,2,1};
+              const float d = dot(native_f32::load(a), native_f32::load(b));
+              P ps[4]{{1,2},{3,4},{5,6},{7,8}};
+              soa_array<L> soa(ps, 4);
+              std::printf("dot=%.1f soa_x0=%.1f native_lanes=%zu\n", (double)d,
+                          (double)soa.data<field_of<&P::x>>()[0],
+                          (size_t)native_f32::lanes);
+              return 0;
+          }
+          EOF
+
+          march='${{ matrix.march }}'
+          if [ "$march" = "(default)" ]; then march=""; fi
+
+          cmake -S . -B b -G Ninja \
+            -DCMAKE_PREFIX_PATH=${{ runner.temp }}/vectis-prefix \
+            -DCMAKE_CXX_COMPILER=g++-14 \
+            -DCMAKE_CXX_FLAGS="$march"
+          cmake --build b
+          ./b/consumer
+
+  # ---------------------------------------------------------------------------
+  # The assembly layer.
+  #
+  # Defends against: asm that drifts away from the intrinsics it is supposed to
+  # match; asm symbols that are silently not linked in.
+  # ---------------------------------------------------------------------------
+  assembly:
+    name: assembly parity (asm=${{ matrix.asm }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        asm: ["ON", "OFF"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq g++-14 ninja-build binutils
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=g++-14 \
+            -DVECTIS_ISA_TIER=avx2 \
+            -DVECTIS_ENABLE_ASM=${{ matrix.asm }} \
+            -DVECTIS_WERROR=ON
+
+      - run: cmake --build build --parallel
+
+      # The asm and intrinsics kernels must agree bit for bit, including on the
+      # ragged tail where their loop structures differ.
+      - name: Parity
+        run: ctest --test-dir build -R asm --output-on-failure
+
+      - name: Verify the kernels really are linked in
+        if: matrix.asm == 'ON'
+        run: |
+          if ! nm -C build/tests/vectis_tests | grep -q vectis_asm; then
+            echo "::error::VECTIS_ENABLE_ASM=ON but no asm symbols are linked"
+            exit 1
+          fi
+          nm -C build/tests/vectis_tests | grep vectis_asm
+
+      - run: ctest --test-dir build --output-on-failure
+
+  # ---------------------------------------------------------------------------
+  # Other architectures and operating systems.
+  #
+  # Defends against: the scalar backend being secretly x86-shaped.  Vectis has
+  # no NEON backend yet, so on ARM the scalar path is the whole library - and it
+  # must therefore actually work there.
+  # ---------------------------------------------------------------------------
+  platforms:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04-arm, macos-14, macos-13]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Ninja (Linux)
+        if: startsWith(matrix.os, 'ubuntu')
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ninja-build
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DVECTIS_ENABLE_ASM=OFF \
+            -DVECTIS_WERROR=ON
+
+      - run: cmake --build build --parallel
+      - run: ctest --test-dir build --output-on-failure
+      - run: ./build/tools/vectis-cpuinfo
+
+  # ---------------------------------------------------------------------------
+  # Single gate for branch protection.
+  #
+  # Defends against: a red matrix where the one failing job is easy to miss.
+  # ---------------------------------------------------------------------------
+  gate:
+    name: all gates green
+    if: always()
+    needs:
+      - hardware
+      - tiers
+      - compilers
+      - standards
+      - optimization
+      - headers
+      - consumer
+      - assembly
+      - platforms
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check every dependency succeeded
+        run: |
+          echo '${{ toJSON(needs) }}'
+          if echo '${{ toJSON(needs) }}' | grep -q '"result": "failure"'; then
+            echo "::error::at least one CI job failed"
+            exit 1
+          fi
+          if echo '${{ toJSON(needs) }}' | grep -q '"result": "cancelled"'; then
+            echo "::error::at least one CI job was cancelled"
+            exit 1
+          fi
+          {
+            echo "### All gates green"
+            echo "Runner AVX-512: ${{ needs.hardware.outputs.avx512 }}"
+          } >> $GITHUB_STEP_SUMMARY

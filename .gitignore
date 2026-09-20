@@ -1,0 +1,31 @@
+# Build trees.  The project is header-only, so nothing here is a source of
+# truth and nothing here belongs in the repository.
+build/
+build-*/
+cmake-build-*/
+out/
+
+# CMake and compiler droppings
+CMakeCache.txt
+CMakeFiles/
+CMakeUserPresets.json
+compile_commands.json
+.cache/
+*.o
+*.a
+*.so
+*.d
+
+# Coverage and analysis output
+*.gcda
+*.gcno
+*.gcov
+coverage.txt
+tidy.log
+cppcheck.log
+
+# Editor and OS noise
+.vscode/
+.idea/
+*.swp
+.DS_Store
