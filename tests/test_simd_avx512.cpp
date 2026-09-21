@@ -14,9 +14,10 @@
 // a translation unit that was compiled for it.
 //
 // What this buys: one test binary that fully exercises AVX-512 on any host that
-// has it, regardless of which tier the library itself was built for.  On
-// GitHub's Xeon Platinum runners that is real coverage of the widest tier,
-// which is exactly the hardware the machine in front of you does not have.
+// has it, regardless of which tier the library itself was built for.  On the CI
+// runners that report AVX-512 - AMD EPYC 7763, Zen 3 - that is real coverage of
+// the widest tier, which is exactly the hardware the machine in front of you
+// does not have.  The pool is mixed, so it is coverage per run, not per commit.
 //
 // ===========================================================================
 #include "backend_batteries.hpp"

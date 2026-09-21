@@ -25,7 +25,7 @@
 //     reg iota();                 // 0,1,2,...  (integers only)
 //
 //   arithmetic      add, sub, mul             (all T)
-//                   div                       (floating point, and i32)
+//                   div                       (floating point only)
 //                   fma(a,b,c) = a*b + c      (floating point)
 //                   neg, abs
 //   floating point  sqrt, rsqrt_approx, rcp_approx

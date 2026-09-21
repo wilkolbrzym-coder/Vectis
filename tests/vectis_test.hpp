@@ -16,6 +16,10 @@
 //   REQUIRE(cond)                 record a failure and stop this test
 //   vtest::skip("why"); return;   this test cannot run here - reported as skip
 //
+// The runner takes --fail-on-skip, which turns any skip into exit code 1: the
+// flag a caller uses when "this tier did not execute here" is not an acceptable
+// answer.  Exit codes are documented in test_main.cpp.
+//
 // ===========================================================================
 #pragma once
 

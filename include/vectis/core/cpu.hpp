@@ -8,8 +8,8 @@
 // under us can actually do right now.  Code that ships AVX-512 kernels inside
 // an AVX2 binary must gate the call on cpu::has(isa_level::avx512).
 //
-// Detection is free after the first call: __builtin_cpu_supports reads a table
-// the C runtime already built during startup.
+// Detection is free after the first call: the result is computed once and
+// cached in a function-local static.
 // ===========================================================================
 #pragma once
 

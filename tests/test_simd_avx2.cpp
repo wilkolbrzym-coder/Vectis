@@ -2,9 +2,20 @@
 // Vectis - AVX2 battery (compiled for AVX2; see backend_batteries.hpp)
 // ===========================================================================
 //
-// Compiled with `-mavx2 -mfma` and with AVX-512 explicitly disabled, so it is a
-// pure AVX2 translation unit regardless of which tier the library was built
-// for.  Entered only after cpu::has(isa_level::avx2).
+// Compiled with `-mavx2 -mfma` and, when the tier allows it, with AVX-512
+// explicitly disabled, so it is a pure AVX2 translation unit regardless of which
+// tier the library was built for.  Entered only after cpu::has(isa_level::avx2).
+//
+// The caveat on "pure": `-mno-avx512*` is only added for the explicit `avx2`
+// and `scalar` tiers.  It cannot be added to `auto` or `native`, because a
+// `-march=native` that reports AVX10.1-512 makes GCC 14 reject the disable
+// outright - "-mno-evex512 cannot disable AVX10 instructions when AVX10.1-512 is
+// available" - which is a red build under -Werror.  On those tiers, running on a
+// host with AVX-512, this unit inherits an AVX-512 baseline and the compiler may
+// auto-vectorise around the battery with ZMM.  The battery's own kernels are
+// unaffected (they call explicit `_mm256_*` intrinsics), but the claim being
+// tested is then "the 256-bit backend is correct", not "these bytes are
+// AVX2-only".  See tests/CMakeLists.txt for where the flags are chosen.
 //
 // The symmetry with test_simd_avx512.cpp is the point: between the two files
 // and the portable one, a single test binary exercises the scalar oracle, the

@@ -14,10 +14,26 @@
 // ===========================================================================
 #pragma once
 
-#define VECTIS_VERSION_MAJOR 0
-#define VECTIS_VERSION_MINOR 1
-#define VECTIS_VERSION_PATCH 0
-#define VECTIS_VERSION_STRING "0.1.0"
+// The library version.
+//
+// It is spelled here as well as in CMakeLists.txt because a header-only library
+// has to be able to report its own version without the build system: a consumer
+// that vendored this directory has no CMake cache to ask, and vectis-cpuinfo is
+// expected to name the version of the code it was built from.  Neither copy can
+// be derived from the other, so they are two sources of truth and they drift -
+// bumping the release version is two edits, and doing only one of them is how a
+// package ends up announcing 0.1.1 while its own tool prints 0.1.0.  The build
+// therefore compares them at configure time and refuses to proceed if they
+// disagree.
+//
+// Overridable as a group: defining VECTIS_VERSION_STRING alone leaves the
+// numeric macros behind.
+#ifndef VECTIS_VERSION_STRING
+#  define VECTIS_VERSION_MAJOR 0
+#  define VECTIS_VERSION_MINOR 1
+#  define VECTIS_VERSION_PATCH 1
+#  define VECTIS_VERSION_STRING "0.1.1"
+#endif
 
 // ------------------------------------------------------------------ compiler
 //

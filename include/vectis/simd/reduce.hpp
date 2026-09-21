@@ -5,8 +5,11 @@
 //
 // Reductions are where the padding lanes of a partially-filled final register
 // would silently corrupt the answer.  Every function here therefore reduces
-// exactly N lanes: whole registers are folded with vector operations, and the
-// partial register - if there is one - has only its live lanes read.
+// exactly N lanes: the partial register - if there is one - has only its live
+// lanes read.  Whole registers are folded with vector operations, and where a
+// fold order would change the answer - the min and max reductions, whose rule is
+// not associative - the data decides which of two orders is used.  See
+// reduce_ordered.
 //
 // On the shape of the code: the horizontal step stages the register through a
 // 64-byte aligned buffer and sums it scalar-wise.  A shuffle tree would avoid
@@ -71,25 +74,73 @@ template <SimdVec V>
 
 namespace detail {
 
-/// Shared shape for min and max.
+/// True when any lane of any full register is a NaN or a zero.
 ///
-/// Two different folds are at work and they must not be confused: the register
-/// fold combines *vectors* with the backend's min/max, while the horizontal step
-/// combines *scalars*.  `better` is the scalar predicate - (candidate beats
-/// current) - and it has to reproduce the hardware rule `(a < b) ? a : b`
-/// exactly, not approximate it with `candidate < current`.
+/// This runs on the fast path of reduce_min/reduce_max, so it has to be cheaper
+/// than the fold it guards, and it is written at the register level for exactly
+/// that reason: comparing whole `basic_vec`s materialises a mask object per
+/// operand and ends up costing more than the fold it was supposed to protect.
+/// Two register comparisons and two mask combine steps per register, with one
+/// mask_bits at the end, is the whole check - and it is what decides the branch,
+/// up front, so that the two orders stay separate functions.  Merging them into
+/// one body, or deciding afterwards and re-running, both cost the fast path
+/// several times its speed.
 ///
-/// The difference is which operand wins a tie, and it is observable without any
-/// NaN: scanning `[a, b]` left to right, the rule is `(a < b) ? a : b`, so `b`
-/// survives unless `a` strictly beats it - i.e. the predicate is `!(current <
-/// candidate)`.  The tempting `candidate < current` keeps `a` instead, which
-/// disagrees with the register fold on `-0.0` vs `+0.0` and on every NaN, and
-/// therefore makes reduce_min/reduce_max return different answers at different
-/// tiers for the same logical input.  The scalar backend is the oracle; this
-/// predicate is what keeps the horizontal step faithful to it.
+/// `cmpeq(r, zero)` is true for both signs of zero, which is what makes it the
+/// right test: the sign is the thing that makes a zero order-sensitive.
+template <class B, class V>
+[[nodiscard]] inline bool any_nan_or_zero(const V& v) noexcept {
+    const auto z = B::zero();
+    auto bad = B::mask_false();
+    for (std::size_t i = 0; i < V::full_regs; ++i) {
+        const auto r = v.raw()[i];
+        bad = B::mask_or(bad, B::cmpne(r, r));   // true only for NaN
+        bad = B::mask_or(bad, B::cmpeq(r, z));   // true for +0.0 and -0.0
+    }
+    return B::mask_bits(bad) != 0;
+}
+
+/// Every lane in turn, register after register: the order the oracle folds in.
+///
+/// Separate from the fold below rather than a branch inside it, so that each
+/// order compiles on its own.  Sharing one body between them cost the fast path
+/// five times its speed for a branch that almost always went the other way.
+template <SimdVec V, class Better>
+[[nodiscard]] inline typename V::value_type
+reduce_in_lane_order(const V& v, Better better) noexcept {
+    using B = typename V::backend_type;
+    using T = typename V::value_type;
+
+    T best{};
+    bool seeded = false;
+    auto consider = [&](T x) {
+        if (!seeded) { best = x; seeded = true; }
+        else if (better(x, best)) { best = x; }
+    };
+
+    if constexpr (V::full_regs > 0) {
+        alignas(64) T tmp[B::lanes];
+        for (std::size_t i = 0; i < V::full_regs; ++i) {
+            B::store(tmp, v.raw()[i]);
+            for (std::size_t j = 0; j < B::lanes; ++j) consider(tmp[j]);
+        }
+    }
+    // The partial register contributes only its live lanes.
+    if constexpr (V::tail_lanes > 0) {
+        alignas(64) T tail[B::lanes];
+        read_tail(v, tail);
+        for (std::size_t j = 0; j < V::tail_lanes; ++j) consider(tail[j]);
+    }
+    return best;
+}
+
+/// Fold the whole registers lane-wise, scan the accumulator once, then the tail.
+///
+/// Only ever called when the guard in reduce_ordered has established that this
+/// order gives the same answer as the lane-by-lane one.
 template <SimdVec V, class VecFold, class Better>
 [[nodiscard]] inline typename V::value_type
-reduce_ordered(const V& v, VecFold vec_fold, Better better) noexcept {
+reduce_folded(const V& v, VecFold vec_fold, Better better) noexcept {
     using B = typename V::backend_type;
     using T = typename V::value_type;
 
@@ -109,13 +160,58 @@ reduce_ordered(const V& v, VecFold vec_fold, Better better) noexcept {
         B::store(tmp, acc);
         for (std::size_t j = 0; j < B::lanes; ++j) consider(tmp[j]);
     }
-    // The partial register contributes only its live lanes.
+    // The partial register is scanned in lane order, which is the oracle's order
+    // for it either way, so it needs no guard of its own.
     if constexpr (V::tail_lanes > 0) {
         alignas(64) T tail[B::lanes];
         read_tail(v, tail);
         for (std::size_t j = 0; j < V::tail_lanes; ++j) consider(tail[j]);
     }
     return best;
+}
+
+/// Shared shape for min and max.
+///
+/// There are two orders the lanes can be folded in, and only one of them is
+/// right for every input.
+///
+/// The rule is `(a < b) ? a : b` - keep the right operand unless the left one
+/// strictly beats it - and it is neither associative nor commutative.  With a
+/// NaN or a signed zero in the data the answer depends on where the operands
+/// sit, so the fold order is part of the result and not an implementation
+/// detail.  The scalar backend folds in lane order and it is the oracle:
+/// reduce_min and reduce_max have to return its answer on every tier, which is
+/// the whole point of the battery they are tested by.
+///
+/// Folding the registers lane-wise first is faster and answers identically for
+/// every input where the two orders cannot disagree: NaN-free data whose lanes
+/// include no zero.  The minimum there is unique, and equal values have equal bit
+/// patterns, so the fold has nothing left to be order-sensitive about.  Folding
+/// without those conditions is the bug that made a 16-lane AVX2 vector holding
+/// `{100,50,60,0.5,70,80,90,95,NaN,10,20,30,40,45,55,65}` reduce to `0.5` on
+/// AVX2 and to `10` on scalar: the fold moves every lane past an earlier
+/// column's NaN, and the sequential scan does not.
+///
+/// So the guard below is a correctness condition, not a hint - lane order when
+/// the data can expose the difference, the fold when it cannot.  Integers never
+/// take the lane-order path, because an integer order is total and the fold is
+/// exact for them whatever the data; they pay nothing for it, and neither does a
+/// vector that fits in one register.
+///
+/// `better` is the scalar predicate - (candidate beats current) - and it has to
+/// reproduce `(a < b) ? a : b` exactly, not approximate it with `candidate <
+/// current`.  The tempting `candidate < current` keeps the left operand instead,
+/// which disagrees on `-0.0` vs `+0.0` and on every NaN.
+template <SimdVec V, class VecFold, class Better>
+[[nodiscard]] inline typename V::value_type
+reduce_ordered(const V& v, VecFold vec_fold, Better better) noexcept {
+    using B = typename V::backend_type;
+    using T = typename V::value_type;
+
+    if constexpr (V::full_regs > 1 && std::floating_point<T>) {
+        if (any_nan_or_zero<B>(v)) return reduce_in_lane_order(v, better);
+    }
+    return reduce_folded(v, vec_fold, better);
 }
 
 } // namespace detail

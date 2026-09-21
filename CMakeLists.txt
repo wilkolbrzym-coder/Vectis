@@ -1,11 +1,41 @@
 cmake_minimum_required(VERSION 3.24)
 
 project(vectis
-    VERSION 0.1.0
+    VERSION 0.1.1
     DESCRIPTION "Compile-time SIMD engine for C++"
     LANGUAGES CXX)
 
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
+
+# ---------------------------------------------------------------------------
+# The version lives in two places, and they have to agree
+#
+# CMakeLists.txt's PROJECT_VERSION is what find_package matches on; the macros in
+# include/vectis/core/config.hpp are what a vendored copy - and vectis-cpuinfo -
+# can report without a build system.  Neither can be derived from the other: the
+# header has to compile on its own.  So they are checked, because "bump the
+# version" is two edits and everyone eventually makes one of them.  The release
+# that added this shipped a package announcing 0.1.1 while its own tool printed
+# 0.1.0, and nothing noticed until the binary was run.
+# ---------------------------------------------------------------------------
+file(STRINGS include/vectis/core/config.hpp VECTIS_HEADER_VERSION_LINE
+     REGEX "^# *define VECTIS_VERSION_STRING ")
+string(REGEX MATCH "\"([0-9]+\\.[0-9]+\\.[0-9]+)\""
+       VECTIS_HEADER_VERSION_MATCH "${VECTIS_HEADER_VERSION_LINE}")
+set(VECTIS_HEADER_VERSION "${CMAKE_MATCH_1}")
+if(NOT VECTIS_HEADER_VERSION)
+    message(FATAL_ERROR
+        "include/vectis/core/config.hpp has no readable "
+        "VECTIS_VERSION_STRING; the version check below cannot run, and a "
+        "check that silently does not run is worse than no check.")
+endif()
+if(NOT VECTIS_HEADER_VERSION STREQUAL PROJECT_VERSION)
+    message(FATAL_ERROR
+        "version mismatch: CMakeLists.txt says ${PROJECT_VERSION}, "
+        "include/vectis/core/config.hpp says ${VECTIS_HEADER_VERSION}.  "
+        "find_package reads one and vectis-cpuinfo prints the other, so a "
+        "release has to bump both.")
+endif()
 
 # ---------------------------------------------------------------------------
 # Options

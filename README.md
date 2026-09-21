@@ -74,26 +74,42 @@ using L = vectis::mem_layout<Particle, &Particle::x, &Particle::y, ...>;
 | AoS → SoA with **real reflection** (GCC 16, `-freflection`) | working — no field list, no annotations |
 | AoS → SoA without reflection, via pointer-to-member NTTPs | working |
 | Assembly layer (GAS `.S`, AVX2): `dot`, `saxpy`, `sum` | working, bit-parity tested |
-| Tests | 25 tests / ~72 000 assertions on GCC 15; 30 tests / ~80 000 with GCC 16's reflection enabled |
-| AVX-512 **execution** | **not verified here** — see below |
+| Tests | 25 registered / ~73 000 assertions on GCC 15 — 2 skip without AVX-512, 1 without reflection; 30 / ~81 000 on GCC 16 |
+| AVX-512 **execution** | real, on the runs whose runner has AVX-512 — see below |
 
 ### The hardware this was built on
 
 The development machine is an **Intel i5-6500T (Skylake, 2015)**: AVX2, FMA,
 BMI2, AES, PCLMULQDQ — and **no AVX-512 at all**. So:
 
-* AVX2 is the ceiling for anything measured in this repository.
-* The AVX-512 backend is **compiled and linked** and its code generation is
-  verified (it emits `zmm` registers and `vfmadd132ps`), but it **cannot be
-  executed here**. Running a tier-`avx512` binary on this CPU dies with SIGILL,
-  which is the expected result and not a bug.
-* **GitHub's hosted runners do not have AVX-512 either.** This was verified the
-  hard way: the first CI runs died with `vectis_avx512 (ILLEGAL)` on every
-  runner, because the assumption that `ubuntu-24.04` lands on Ice Lake-SP is
-  wrong for the current runner pool. So the AVX-512 backend is currently
-  verified by *compilation and code generation* only, everywhere. Running it
-  needs a machine you have to bring yourself - a self-hosted runner, or a cloud
-  instance on Sapphire Rapids, Ice Lake or Zen 4/5.
+* AVX2 is the ceiling for anything measured in this repository, and a
+  tier-`avx512` binary run here dies with SIGILL, which is the expected result
+  and not a bug.
+* The AVX-512 backend is **compiled and linked on every tier**, and its code
+  generation is verified — it emits `zmm`, `vpcmp`, `vrsqrt14ps` and
+  `vpternlogd` — but whether it *executes* is decided somewhere else.
+
+**AVX-512 does execute in CI, but not on every run.** GitHub's `ubuntu-24.04`
+pool is mixed. Some runners are AMD EPYC 7763 — Zen 3, so AVX-512F/BW/CD/DQ/VL,
+and *not* the Zen 4-only extensions — and some expose no AVX-512 in
+`/proc/cpuinfo` at all; a job cannot choose which machine it gets. Across five
+runs on 2026-09-20 and 21, the `tier=avx512` job executed its tests on two of
+them and built without running on the other three.
+
+What that buys, and what it does not:
+
+* On a runner that has it, the widest backend runs for real. The battery lives
+  in its own translation unit compiled with `-mavx512*` and is entered through
+  the caller's `cpu::has(isa_level::avx512)`, so those runs genuinely exercise
+  512-bit mask registers, the reduction paths and the 64-bit integer operations
+  AVX2 lacks — not merely their compilation.
+* On a runner that does not, the same binary builds and the battery skips
+  loudly. `vectis_tests` exits 0 either way unless it is given
+  `--fail-on-skip`, so **a green `ctest` is not by itself evidence that AVX-512
+  ran**. The CI step `Did the AVX-512 battery execute?` is what settles that,
+  and it fails if the battery skips on a host that reported AVX-512.
+* Nothing is *measured* for AVX-512: the benchmark job builds at tier `avx2`.
+  Every performance number below is an AVX2 number.
 
 The working set is also small — 32 KiB L1d, 256 KiB L2, 6 MiB L3 — and the
 governor is `powersave`, so absolute timings below are noisy and optimistic
@@ -306,8 +322,12 @@ Two workflows, with different jobs:
 The rule throughout: **build always, run when the hardware allows.** A tier
 that cannot execute on a runner is still compiled, because a compile error is a
 bug; only the execution is skipped, and the job says so in its summary rather
-than passing quietly. The `hardware` job reports the runner's CPU first,
-because every performance claim in this README is meaningless without it.
+than passing quietly. Where the hardware *is* present, a skip is a failure
+instead: `Did the AVX-512 battery execute?` re-runs the 512-bit battery with
+`--fail-on-skip` on every tier, so "the widest backend ran" is checked rather
+than assumed, and a run that reports AVX-512 but skips is red. The `hardware`
+job reports the runner's CPU first, because every performance claim in this
+README is meaningless without it.
 
 Steps that depend on a tool which was unavailable on the development machine —
 valgrind, clang-tidy, cppcheck — are marked `continue-on-error: true` and say so
@@ -361,12 +381,12 @@ tools/cpuinfo.cpp        what this binary will use, and what the CPU can run
 
 ## Known limitations
 
-* **The AVX-512 backend has never been executed anywhere.** Its code generation
-  is verified - it emits `zmm`, `vpcmp`, `vrsqrt14ps` and `vpternlogd` - and it
-  builds clean on every compiler in the matrix, but no machine that has run this
-  code so far has had AVX-512. Treat it as compiled-but-unproven, and treat any
-  claim about its performance as unmeasured. The `hardware` CI job prints
-  whether a given runner could have run it.
+* **AVX-512 execution coverage in CI is probabilistic.** GitHub's runner pool is
+  mixed, so whether a given run exercises the 512-bit backend depends on which
+  machine a job landed on. Every run says which happened — the summary reports
+  the battery's own output, and a skip on a host that has AVX-512 fails the job
+  — but a single green run is not proof that it ran. Its *performance* stays
+  unmeasured either way: the benchmark job builds at tier `avx2`.
 * **Reflection needs `-freflection`, which is GCC-only today.** Clang has no
   P2996 implementation in any released version, so the reflection path is
   exercised on exactly one compiler. The pointer-to-member path is what
@@ -391,10 +411,12 @@ tools/cpuinfo.cpp        what this binary will use, and what the CPU can run
    a separately written implementation of the same operations, and comparing
    against it would be a second opinion on every kernel - stronger than the
    scalar oracle, which is ours and shares our assumptions.
-1. Execute the AVX-512 backend somewhere. GitHub-hosted runners cannot do it,
-   so this needs a self-hosted runner or a cloud instance on Sapphire Rapids,
-   Ice Lake or Zen 4/5. Nothing below matters until the widest backend has run
-   at least once.
+1. Make the AVX-512 coverage deterministic, then measure it. Today the widest
+   backend runs on the runs that happen to land on a machine with AVX-512, and
+   only compiles on the rest — coverage by luck. A self-hosted runner, or a
+   cloud instance on Sapphire Rapids, Ice Lake or Zen 4/5, would make it every
+   run, and would let the benchmark job build a tier-`avx512` binary: the only
+   way the numbers above stop being AVX2 numbers.
 2. Add `int8`/`int16` lanes with `vpermb`/`vpshufb` — the crypto and compression
    workloads in the original brief need them, and byte permutes are where
    AVX-512's advantage over AVX2 is largest.

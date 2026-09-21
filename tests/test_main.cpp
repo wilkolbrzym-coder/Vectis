@@ -6,12 +6,20 @@
 //
 //   0  everything selected ran and passed (skips allowed: a tier the host does
 //      not have is a missing CPU, not a defect)
-//   1  at least one test failed
+//   1  at least one test failed, or --fail-on-skip was given and something
+//      skipped
 //   2  the command line was wrong, or the filter matched nothing
 //
 // Skips are reported as `skip` and counted on their own line.  They used to be
 // reported as `ok`, which made "2/2 tests passed (0 checks)" - a green result
 // that executed nothing - look like a pass in a CI log.
+//
+// Counting them separately is only half of the fix, because the exit code is
+// what a caller reads: a job that means "verify AVX-512" and runs a suite that
+// skipped every test still exits 0 without --fail-on-skip, so a green ctest
+// cannot tell "the backend ran and passed" from "the backend never ran".  That
+// is a distinction two CI gates depend on - the AVX-512 battery and the
+// reflection path - and both now pass this flag rather than trusting the log.
 // ===========================================================================
 #include "vectis_test.hpp"
 
@@ -25,7 +33,7 @@ namespace {
 /// while the log said a filter had been applied.
 int usage(const char* arg) {
     std::printf("unknown argument: %s\n"
-                "usage: vectis_tests [--filter <substring>] [--list]\n",
+                "usage: vectis_tests [--filter <substring>] [--list] [--fail-on-skip]\n",
                 arg == nullptr ? "" : arg);
     return 2;
 }
@@ -35,6 +43,7 @@ int usage(const char* arg) {
 int main(int argc, char** argv) {
     const char* filter = nullptr;
     bool list_only = false;
+    bool fail_on_skip = false;
 
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--filter") == 0) {
@@ -44,6 +53,8 @@ int main(int argc, char** argv) {
             filter = argv[i] + 9;
         } else if (std::strcmp(argv[i], "--list") == 0) {
             list_only = true;
+        } else if (std::strcmp(argv[i], "--fail-on-skip") == 0) {
+            fail_on_skip = true;
         } else {
             return usage(argv[i]);
         }
@@ -80,7 +91,11 @@ int main(int argc, char** argv) {
         std::fflush(stdout);
     }
 
-    std::printf("\n%d/%d tests passed", run - failed, run);
+    // The ratio counts only the tests that executed.  "25/25 passed, 3 skipped"
+    // reads as 25 successes when 22 of them ran, which is the same
+    // green-by-omission this runner was fixed for once already.
+    const int executed = run - skipped;
+    std::printf("\n%d/%d tests passed", executed - failed, executed);
     if (skipped != 0) std::printf(", %d skipped", skipped);
     std::printf("  (%d checks, %d failures)\n",
                 vtest::check_count(), vtest::failure_count());
@@ -88,6 +103,11 @@ int main(int argc, char** argv) {
     if (run == 0) {
         std::printf("no tests matched filter '%s'\n", filter ? filter : "");
         return 2;
+    }
+    if (fail_on_skip && skipped != 0) {
+        std::printf("--fail-on-skip: %d of %d selected tests did not execute here\n",
+                    skipped, run);
+        return 1;
     }
     return failed == 0 ? 0 : 1;
 }

@@ -243,7 +243,11 @@ void battery() {
     // ---- reductions ------------------------------------------------------
     check_reduction(reduce_add(va), reduce_add(oa));
     if constexpr (BackendHasMinMax<T, Abi>) {
-        // min/max are exact and associative, so these stay bit-for-bit.
+        // Bit-for-bit is the right expectation here only because this data
+        // holds no NaN and no signed-zero tie, and those are the sole cases in
+        // which a min/max reduction is order-independent.  The cases that are
+        // not are the point of reduce_agrees_with_oracle, which runs the same
+        // shapes with both present.
         CHECK_SAME(reduce_min(va), reduce_min(oa));
         CHECK_SAME(reduce_max(va), reduce_max(oa));
     }
@@ -539,22 +543,29 @@ void mask_equality_is_observable_equality() {
 
 /// reduce_min/reduce_max must return the same answer at every tier for the same
 /// logical input.  The scalar backend is the oracle, so anything else is a bug
-/// in the horizontal step.
+/// in the fold order.
 ///
-/// The register fold uses the hardware rule `(a<b) ? a : b`; the horizontal
-/// step is a separate fold over scalars and was written with
-/// `candidate < current`, which keeps the *left* operand instead of the right
-/// one.  Nothing is needed to observe the difference but a tie or a NaN:
-/// `reduce_min([-0.0, +0.0, ...])` was `-0.0` on AVX2 and `+0.0` on scalar, and
-/// `reduce_min([NaN, 1, ...])` was NaN on one and 1 on the other.  CHECK_BITS,
-/// not CHECK_ULP, because the sign of zero is the whole point and ulp_distance
+/// The rule behind both is `(a<b) ? a : b`, which is neither associative nor
+/// commutative: with a NaN or a signed zero present the answer depends on where
+/// the operands sit.  Two wrong versions hid behind that.  The first kept the
+/// *left* operand on a tie (`candidate < current`), so
+/// `reduce_min([-0.0, +0.0, ...])` was `-0.0` on AVX2 and `+0.0` on scalar.  The
+/// second was the fold order itself: the registers were collapsed lane-wise into
+/// one accumulator and scanned afterwards, which reorders every element after a
+/// NaN, so the 16-lane AVX2 vector `{100,50,60,0.5,70,80,90,95,NaN,10,20,30,40,
+/// 45,55,65}` reduced to `0.5` on AVX2 and to `10` on scalar.  CHECK_BITS, not
+/// CHECK_ULP, because the sign of zero is the whole point and ulp_distance
 /// deliberately reports it as zero.
-template <class Abi>
-void reduce_agrees_with_oracle() {
+template <class Abi, std::size_t N>
+void reduce_oracle_at() {
     const float nan = std::numeric_limits<float>::quiet_NaN();
     const float inf = std::numeric_limits<float>::infinity();
 
-    const std::array<std::array<float, 8>, 9> cases{{
+    // Eight lanes each, cycled to fill N.  The cycling is the load-bearing part:
+    // it is what puts a NaN or a signed zero in more than one register, and a
+    // vector that fits in a single register takes the same path as the oracle
+    // does, so it can never see the difference.
+    const std::array<std::array<float, 8>, 9> seeds{{
         {nan, 1.f, 2.f, 3.f, 4.f, 5.f, 6.f, 7.f},        // NaN first
         {1.f, 2.f, 3.f, 4.f, 5.f, 6.f, 7.f, nan},        // NaN last
         {1.f, nan, 2.f, 3.f, nan, 5.f, 6.f, 7.f},        // NaN in the middle
@@ -566,20 +577,54 @@ void reduce_agrees_with_oracle() {
         {3.f, 3.f, 3.f, 3.f, 3.f, 3.f, 3.f, 3.f},        // every lane equal
     }};
 
-    for (const auto& in : cases) {
-        const auto vn = basic_vec<float, 8, Abi>::load(in.data());
-        const auto vs = basic_vec<float, 8, scalar_abi>::load(in.data());
+    for (const auto& seed : seeds) {
+        std::array<float, N> in{};
+        for (std::size_t i = 0; i < N; ++i) in[i] = seed[i % 8];
+
+        const auto vn = basic_vec<float, N, Abi>::load(in.data());
+        const auto vs = basic_vec<float, N, scalar_abi>::load(in.data());
         CHECK_BITS(reduce_min(vn), reduce_min(vs));
         CHECK_BITS(reduce_max(vn), reduce_max(vs));
     }
 
-    // A vector whose lane count does not fill its register takes the other path
-    // through the horizontal step, so the tie has to be checked there too.
-    const std::array<float, 5> partial{-0.0f, 0.0f, 1.0f, 2.0f, 3.0f};
-    const auto pn = basic_vec<float, 5, Abi>::load(partial.data());
-    const auto ps = basic_vec<float, 5, scalar_abi>::load(partial.data());
-    CHECK_BITS(reduce_min(pn), reduce_min(ps));
-    CHECK_BITS(reduce_max(pn), reduce_max(ps));
+    // The seeds above are periodic, and a periodic vector folds to the same
+    // shape it started as - so they cannot see a fold-order bug no matter how
+    // many NaNs they contain.  Seeing one takes a strictly monotone ramp with a
+    // NaN at a single position, which is the arrangement where the extreme value
+    // sits on opposite sides of the NaN in the two orders: on a rising ramp that
+    // is the minimum (lane order meets it first, column order meets it after the
+    // NaN), and on a falling ramp it is the maximum.  Sweeping the NaN across
+    // every position covers both.
+    for (std::size_t q = 0; q < N; ++q) {
+        for (int falling = 0; falling < 2; ++falling) {
+            std::array<float, N> in{};
+            for (std::size_t i = 0; i < N; ++i) {
+                const auto step = static_cast<float>(i);
+                in[i] = falling != 0 ? -step : step;
+            }
+            in[q] = nan;
+
+            const auto vn = basic_vec<float, N, Abi>::load(in.data());
+            const auto vs = basic_vec<float, N, scalar_abi>::load(in.data());
+            CHECK_BITS(reduce_min(vn), reduce_min(vs));
+            CHECK_BITS(reduce_max(vn), reduce_max(vs));
+        }
+    }
+}
+
+template <class Abi>
+void reduce_agrees_with_oracle() {
+    constexpr std::size_t R = backend<float, Abi>::lanes;
+    // The shapes sweep() uses, and for the same reason: the multi-register path
+    // and the partial final register are both different code, and testing only
+    // one full register is what let the fold-order bug through.
+    reduce_oracle_at<Abi, R>();
+    reduce_oracle_at<Abi, R * 2>();
+    reduce_oracle_at<Abi, R * 3 + 2>();
+    if constexpr (R > 1) {
+        reduce_oracle_at<Abi, R - 1>();    // partial final register
+        reduce_oracle_at<Abi, R + 1>();    // exactly one lane into a second
+    }
 }
 
 /// Integer add/sub/mul/neg wrap at the boundary values, as the hardware does.

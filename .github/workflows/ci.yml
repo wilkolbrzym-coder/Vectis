@@ -121,14 +121,50 @@ jobs:
         if: matrix.tier != 'avx512' || steps.cpu.outputs.avx512 == 'yes'
         run: ctest --test-dir build --output-on-failure
 
-      - name: Report skipped execution
-        if: matrix.tier == 'avx512' && steps.cpu.outputs.avx512 != 'yes'
+      # ctest reports a skipped test as a pass, so a green job is not evidence
+      # that anything executed.  The AVX-512 battery is compiled into every
+      # tier's test binary and skips itself on a host without AVX-512, which
+      # means which job - if any - proves the widest backend ran is a property of
+      # the machine this run landed on, not of the tier.  GitHub's ubuntu-24.04
+      # pool is mixed: some runners are EPYC 7763 and have AVX-512, some have
+      # none.  So ask every tier, and where the hardware is there refuse to
+      # accept a skip as an answer.
+      - name: Did the AVX-512 battery execute?
         run: |
-          echo "::warning::tier avx512 was built but NOT executed: this runner has no AVX-512"
+          if [ "${{ steps.cpu.outputs.avx512 }}" != "yes" ]; then
+            if [ "${{ matrix.tier }}" = "avx512" ]; then
+              echo "::warning::tier avx512 was built but NOT executed: this runner has no AVX-512"
+            fi
+            {
+              echo "### tier ${{ matrix.tier }}: no AVX-512 on this runner"
+              echo "The battery compiled and linked; it did not execute."
+              echo "The runner pool is mixed, so whether this run covers AVX-512 at"
+              echo "all is decided by which machine the job got."
+            } >> $GITHUB_STEP_SUMMARY
+            exit 0
+          fi
+          # --fail-on-skip is the whole point of this step.  Without it the
+          # command exits 0 having executed nothing, which is how "the AVX-512
+          # backend runs in CI" became a claim nothing was checking.
+          #
+          # The output is shown whatever the exit code: a runner that reports
+          # AVX-512 in /proc/cpuinfo while the library's own CPUID check says it
+          # is absent is a contradiction between two detectors, and the log has
+          # to carry the evidence for it.
+          rc=0
+          ./build/tests/vectis_tests --filter avx512 --fail-on-skip \
+              > "$RUNNER_TEMP/avx512.txt" 2>&1 || rc=$?
+          cat "$RUNNER_TEMP/avx512.txt"
           {
-            echo "### tier avx512: built, not executed"
-            echo "This runner has no AVX-512, so the tier is verified by compilation only."
+            echo "### tier ${{ matrix.tier }}: AVX-512 battery"
+            echo '```'
+            cat "$RUNNER_TEMP/avx512.txt"
+            echo '```'
           } >> $GITHUB_STEP_SUMMARY
+          if [ "$rc" != 0 ]; then
+            echo "::error::this runner reports AVX-512 but the battery did not execute"
+          fi
+          exit "$rc"
 
       # vectis-cpuinfo is compiled at the build's tier like everything else, so
       # it cannot run on a machine that lacks that tier either - which is itself
@@ -271,8 +307,11 @@ jobs:
         run: |
           cmake --build build --parallel
           # The reflection tests must actually run, not skip: a suite that
-          # passes because the feature was absent is not a gate.
-          ./build/tests/vectis_tests --filter reflect
+          # passes because the feature was absent is not a gate.  --fail-on-skip
+          # is what makes that true - without it this command exits 0 having
+          # executed nothing, which is the shape of gate this project keeps
+          # discovering it has.
+          ./build/tests/vectis_tests --filter reflect --fail-on-skip
           ctest --test-dir build --output-on-failure
 
   # ---------------------------------------------------------------------------
